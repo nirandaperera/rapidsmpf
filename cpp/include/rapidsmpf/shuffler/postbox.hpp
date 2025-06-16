@@ -104,6 +104,13 @@ class PostBox {
         BufferResource* br
     );
 
+    std::vector<Chunk> concat_pigeonhole(
+        size_t max_concat_size,
+        std::function<ChunkID()> chunk_id_gen,
+        rmm::cuda_stream_view stream,
+        BufferResource* br
+    );
+
     /**
      * @brief Checks if the PostBox is empty.
      *

@@ -6,6 +6,7 @@
 #include <sstream>
 
 #include <rapidsmpf/communicator/communicator.hpp>
+#include <rapidsmpf/nvtx.hpp>
 #include <rapidsmpf/shuffler/chunk.hpp>
 #include <rapidsmpf/shuffler/postbox.hpp>
 #include <rapidsmpf/utils.hpp>
@@ -47,6 +48,7 @@ std::unordered_map<ChunkID, Chunk> PostBox<KeyType>::extract_by_key(KeyType key)
 
 template <typename KeyType>
 std::vector<Chunk> PostBox<KeyType>::extract_all_ready() {
+    RAPIDSMPF_NVTX_FUNC_RANGE();
     std::lock_guard const lock(mutex_);
     std::vector<Chunk> ret;
 
@@ -83,6 +85,7 @@ std::vector<Chunk> PostBox<KeyType>::extract_all_ready_concat(
     rmm::cuda_stream_view stream,
     BufferResource* br
 ) {
+    RAPIDSMPF_NVTX_FUNC_RANGE();
     std::lock_guard const lock(mutex_);
     std::vector<Chunk> ret;
     ret.reserve(pigeonhole_.size());
@@ -122,11 +125,10 @@ std::vector<Chunk> PostBox<KeyType>::extract_all_ready_concat(
                 if (concat_size + chunk.concat_data_size() >= max_concat_size) {
                     concat_and_add_to_ret(std::move(ready_chunks));
                     concat_size = 0;
-                } else {
-                    // add current chunk to the ready chunks
-                    concat_size += chunk.concat_data_size();
-                    ready_chunks.emplace_back(std::move(chunk));
                 }
+                // add current chunk to the ready chunks
+                concat_size += chunk.concat_data_size();
+                ready_chunks.emplace_back(std::move(chunk));
 
                 chunk_it = chunks.erase(chunk_it);
             } else {
@@ -148,7 +150,18 @@ std::vector<Chunk> PostBox<KeyType>::extract_all_ready_concat(
 }
 
 template <typename KeyType>
+std::vector<Chunk> PostBox<KeyType>::concat_pigeonhole(
+    size_t max_concat_size,
+    std::function<ChunkID()> chunk_id_gen,
+    rmm::cuda_stream_view stream,
+    BufferResource* br
+){
+
+}
+
+template <typename KeyType>
 bool PostBox<KeyType>::empty() const {
+    std::lock_guard const lock(mutex_);
     return pigeonhole_.empty();
 }
 
