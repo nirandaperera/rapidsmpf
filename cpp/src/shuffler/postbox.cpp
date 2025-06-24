@@ -24,26 +24,26 @@ void PostBox<KeyType>::insert(Chunk&& chunk) {
         );
     }
     std::lock_guard const lock(mutex_);
-    auto [_, inserted] = pigeonhole_[key].insert({chunk.chunk_id(), std::move(chunk)});
+    auto [_, inserted] = pigeonholes_[key].insert({chunk.chunk_id(), std::move(chunk)});
     RAPIDSMPF_EXPECTS(inserted, "PostBox.insert(): chunk already exist");
 }
 
 template <typename KeyType>
 Chunk PostBox<KeyType>::extract(PartID pid, ChunkID cid) {
     std::lock_guard const lock(mutex_);
-    return extract_item(pigeonhole_[key_map_fn_(pid)], cid).second;
+    return extract_item(pigeonholes_[key_map_fn_(pid)], cid).second;
 }
 
 template <typename KeyType>
 std::unordered_map<ChunkID, Chunk> PostBox<KeyType>::extract(PartID pid) {
     std::lock_guard const lock(mutex_);
-    return extract_value(pigeonhole_, key_map_fn_(pid));
+    return extract_value(pigeonholes_, key_map_fn_(pid));
 }
 
 template <typename KeyType>
 std::unordered_map<ChunkID, Chunk> PostBox<KeyType>::extract_by_key(KeyType key) {
     std::lock_guard const lock(mutex_);
-    return extract_value(pigeonhole_, key);
+    return extract_value(pigeonholes_, key);
 }
 
 template <typename KeyType>
@@ -53,8 +53,8 @@ std::vector<Chunk> PostBox<KeyType>::extract_all_ready() {
     std::vector<Chunk> ret;
 
     // Iterate through the outer map
-    auto pid_it = pigeonhole_.begin();
-    while (pid_it != pigeonhole_.end()) {
+    auto pid_it = pigeonholes_.begin();
+    while (pid_it != pigeonholes_.end()) {
         // Iterate through the inner map
         auto& chunks = pid_it->second;
         auto chunk_it = chunks.begin();
@@ -69,100 +69,19 @@ std::vector<Chunk> PostBox<KeyType>::extract_all_ready() {
 
         // Remove the pid entry if its chunks map is empty
         if (chunks.empty()) {
-            pid_it = pigeonhole_.erase(pid_it);
+            pid_it = pigeonholes_.erase(pid_it);
         } else {
             ++pid_it;
         }
     }
 
     return ret;
-}
-
-template <typename KeyType>
-std::vector<Chunk> PostBox<KeyType>::extract_all_ready_concat(
-    size_t max_concat_size,
-    std::function<ChunkID()> chunk_id_gen,
-    rmm::cuda_stream_view stream,
-    BufferResource* br
-) {
-    RAPIDSMPF_NVTX_FUNC_RANGE();
-    std::lock_guard const lock(mutex_);
-    std::vector<Chunk> ret;
-    ret.reserve(pigeonhole_.size());
-
-    auto concat_and_add_to_ret = [&](std::vector<Chunk>&& chunks) {
-        if (chunks.empty()) {
-            return;
-        } else if (chunks.size() == 1) {
-            ret.emplace_back(std::move(chunks[0]));
-        } else {
-            ret.emplace_back(Chunk::concat(std::move(chunks), chunk_id_gen(), stream, br)
-            );
-        }
-    };
-
-    // Iterate through the outer map
-    auto pid_it = pigeonhole_.begin();
-    while (pid_it != pigeonhole_.end()) {
-        // Iterate through the inner map
-        auto& chunks = pid_it->second;
-
-        std::vector<Chunk> ready_chunks;
-        ready_chunks.reserve(chunks.size());
-        size_t concat_size = 0;
-
-        for (auto chunk_it = chunks.begin(); chunk_it != chunks.end();) {
-            auto& chunk = chunk_it->second;
-            if (chunk.is_ready()) {
-                if (chunk.n_messages() >= 1) {
-                    // chunk has been already concatenated
-                    ret.emplace_back(std::move(chunk));
-                    chunk_it = chunks.erase(chunk_it);
-                    continue;
-                }
-                // if adding current chunk exceeds the max concat size,
-                // concatenate the current chunks and add them to the ret
-                if (concat_size + chunk.concat_data_size() >= max_concat_size) {
-                    concat_and_add_to_ret(std::move(ready_chunks));
-                    concat_size = 0;
-                }
-                // add current chunk to the ready chunks
-                concat_size += chunk.concat_data_size();
-                ready_chunks.emplace_back(std::move(chunk));
-
-                chunk_it = chunks.erase(chunk_it);
-            } else {
-                ++chunk_it;
-            }
-        }
-
-        concat_and_add_to_ret(std::move(ready_chunks));
-
-        // Remove the pid entry if its chunks map is empty
-        if (chunks.empty()) {
-            pid_it = pigeonhole_.erase(pid_it);
-        } else {
-            ++pid_it;
-        }
-    }
-
-    return ret;
-}
-
-template <typename KeyType>
-std::vector<Chunk> PostBox<KeyType>::concat_pigeonhole(
-    size_t max_concat_size,
-    std::function<ChunkID()> chunk_id_gen,
-    rmm::cuda_stream_view stream,
-    BufferResource* br
-){
-
 }
 
 template <typename KeyType>
 bool PostBox<KeyType>::empty() const {
     std::lock_guard const lock(mutex_);
-    return pigeonhole_.empty();
+    return pigeonholes_.empty() && !data_offloaded_;
 }
 
 template <typename KeyType>
@@ -171,7 +90,7 @@ std::vector<std::tuple<KeyType, ChunkID, std::size_t>> PostBox<KeyType>::search(
 ) const {
     std::lock_guard const lock(mutex_);
     std::vector<std::tuple<KeyType, ChunkID, std::size_t>> ret;
-    for (auto& [key, chunks] : pigeonhole_) {
+    for (auto& [key, chunks] : pigeonholes_) {
         for (auto& [cid, chunk] : chunks) {
             if (!chunk.is_control_message(0) && chunk.data_memory_type() == mem_type) {
                 ret.emplace_back(key, cid, chunk.concat_data_size());
@@ -188,7 +107,7 @@ std::string PostBox<KeyType>::str() const {
     }
     std::stringstream ss;
     ss << "PostBox(";
-    for (auto const& [key, chunks] : pigeonhole_) {
+    for (auto const& [key, chunks] : pigeonholes_) {
         ss << "k=" << key << ": [";
         for (auto const& [cid, chunk] : chunks) {
             assert(cid == chunk.chunk_id());

@@ -40,7 +40,7 @@ class PostBox {
     PostBox(Fn&& key_map_fn, size_t num_keys_hint = 0)
         : key_map_fn_(std::move(key_map_fn)) {
         if (num_keys_hint > 0) {
-            pigeonhole_.reserve(num_keys_hint);
+            pigeonholes_.reserve(num_keys_hint);
         }
     }
 
@@ -90,28 +90,6 @@ class PostBox {
     std::vector<Chunk> extract_all_ready();
 
     /**
-     * @brief Extracts all ready chunks from the PostBox and concatenates them.
-     *
-     * @param chunk_id_gen A function that generates a new chunk ID.
-     * @param stream The CUDA stream to use for the concatenation.
-     * @param br The buffer resource to use for the concatenation.
-     * @return A vector of all ready chunks in the PostBox.
-     */
-    std::vector<Chunk> extract_all_ready_concat(
-        size_t max_concat_size,
-        std::function<ChunkID()> chunk_id_gen,
-        rmm::cuda_stream_view stream,
-        BufferResource* br
-    );
-
-    std::vector<Chunk> concat_pigeonhole(
-        size_t max_concat_size,
-        std::function<ChunkID()> chunk_id_gen,
-        rmm::cuda_stream_view stream,
-        BufferResource* br
-    );
-
-    /**
      * @brief Checks if the PostBox is empty.
      *
      * @return `true` if the PostBox is empty, `false` otherwise.
@@ -141,7 +119,9 @@ class PostBox {
     std::function<key_type(PartID)>
         key_map_fn_;  ///< Function to map partition IDs to keys.
     std::unordered_map<key_type, std::unordered_map<ChunkID, Chunk>>
-        pigeonhole_;  ///< Storage for chunks, organized by a key and chunk ID.
+        pigeonholes_;  ///< Storage for chunks, organized by a key and chunk ID.
+
+    bool data_offloaded_ = false;
 };
 
 /**
