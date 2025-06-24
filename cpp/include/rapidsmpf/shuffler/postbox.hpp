@@ -90,6 +90,23 @@ class PostBox {
     std::vector<Chunk> extract_all_ready();
 
     /**
+     * @brief Reinserts a chunk into the PostBox and unsets the `data_offloaded_` flag.
+     *
+     * @param chunk The chunk to reinsert.
+     */
+    void reinsert(Chunk&& chunk);
+
+    /**
+     * @brief Offloads all ready chunks for a specific key and sets the
+     * `data_offloaded_` flag, so that `empty()` will not return `true`.
+     *
+     * @param key The key to offload chunks for.
+     * @param max_concat_size The maximum size of chunks to concatenate.
+     * @return A vector of all offloaded chunks.
+     */
+    std::vector<Chunk> offload_ready(KeyType key, size_t max_concat_size = 0);
+
+    /**
      * @brief Checks if the PostBox is empty.
      *
      * @return `true` if the PostBox is empty, `false` otherwise.

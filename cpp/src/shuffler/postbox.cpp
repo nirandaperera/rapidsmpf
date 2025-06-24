@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "postbox.hpp"
+
 #include <sstream>
 
 #include <rapidsmpf/communicator/communicator.hpp>
@@ -72,6 +74,47 @@ std::vector<Chunk> PostBox<KeyType>::extract_all_ready() {
             pid_it = pigeonholes_.erase(pid_it);
         } else {
             ++pid_it;
+        }
+    }
+
+    return ret;
+}
+
+template <typename KeyType>
+void PostBox<KeyType>::reinsert(Chunk&& chunk) {
+    // check if all partition IDs in the chunk map to the same key
+    KeyType key = key_map_fn_(chunk.part_id(0));
+    for (size_t i = 1; i < chunk.n_messages(); ++i) {
+        RAPIDSMPF_EXPECTS(
+            key == key_map_fn_(chunk.part_id(i)),
+            "PostBox.reinsert(): all messages in the chunk must map to the same key"
+        );
+    }
+    std::lock_guard const lock(mutex_);
+    auto [_, inserted] = pigeonholes_[key].insert({chunk.chunk_id(), std::move(chunk)});
+    RAPIDSMPF_EXPECTS(inserted, "PostBox.reinsert(): chunk already exist");
+    data_offloaded_ = false;
+}
+
+template <typename KeyType>
+std::vector<Chunk> PostBox<KeyType>::offload_ready(KeyType key, size_t max_concat_size) {
+    RAPIDSMPF_NVTX_FUNC_RANGE();
+    std::lock_guard const lock(mutex_);
+    auto pid_it = pigeonholes_.find(key);
+    if (pid_it == pigeonholes_.end()) {
+        return {};
+    }
+
+    auto& chunks = pid_it->second;
+    std::vector<Chunk> ret;
+    ret.reserve(chunks.size());
+
+    for (auto chunk_it = chunks.begin(); chunk_it != chunks.end();) {
+        if (chunk_it->second.is_ready()) {
+            ret.push_back(std::move(chunk_it->second));
+            chunk_it = chunks.erase(chunk_it);
+        } else {
+            ++chunk_it;
         }
     }
 
