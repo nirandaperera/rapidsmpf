@@ -63,6 +63,31 @@ class Chunk {
 
   public:
     /**
+     * @brief move assignment operator
+     */
+    Chunk& operator=(Chunk&& other) noexcept {
+        if (this != &other) {
+            // Since const members cannot be moved, we need to copy them
+            // This is a bit of a hack, but it's necessary for the STL containers to work
+            const_cast<ChunkID&>(chunk_id_) = other.chunk_id_;
+            const_cast<std::vector<PartID>&>(part_ids_) = std::move(other.part_ids_);
+            const_cast<std::vector<size_t>&>(expected_num_chunks_) = std::move(other.expected_num_chunks_);
+            const_cast<std::vector<uint32_t>&>(meta_offsets_) = std::move(other.meta_offsets_);
+            const_cast<std::vector<uint64_t>&>(data_offsets_) = std::move(other.data_offsets_);
+            
+            // Move the non-const members
+            metadata_ = std::move(other.metadata_);
+            data_ = std::move(other.data_);
+        }
+        return *this;
+    }
+
+    /**
+     * @brief move constructor
+     */
+    Chunk(Chunk&& other) noexcept = default;
+
+    /**
      * @brief The size of the metadata message header.
      *
      * @param n_messages The number of messages in the chunk.
