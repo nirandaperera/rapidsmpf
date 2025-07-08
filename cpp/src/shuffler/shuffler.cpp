@@ -349,8 +349,8 @@ class Shuffler::Progress {
                 it = incoming_chunks_.erase(it);
 
                 // iterate over all messages in the chunk
-                for (size_t i = 0; i < chunk.n_messages(); ++i) {
-                    auto chunk_copy = chunk.get_data(
+                for (size_t i = 0; i < e_chunk.n_messages(); ++i) {
+                    auto chunk_copy = e_chunk.get_data(
                         shuffler_.get_new_cid(), i, shuffler_.stream_, shuffler_.br_
                     );
                     shuffler_.insert_into_ready_postbox(std::move(chunk_copy));
