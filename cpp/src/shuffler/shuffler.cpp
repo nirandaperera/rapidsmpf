@@ -4,6 +4,7 @@
  */
 
 #include <algorithm>
+#include <list>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -262,7 +263,7 @@ class Shuffler::Progress {
                         == shuffler_.comm_->rank(),
                     "receiving chunk not owned by us"
                 );
-                incoming_chunks_.insert({src, std::move(chunk)});
+                incoming_chunks_.emplace_back(src, std::move(chunk));
             } else {
                 break;
             }
@@ -281,18 +282,21 @@ class Shuffler::Progress {
             auto& [src, chunk] = *it;
             log().trace("checking incoming chunk data from ", src, ": ", chunk);
 
+            size_t concat_data_size = chunk.concat_data_size();
+            auto chunk_id = chunk.chunk_id();
+
             // If the chunk contains gpu data, we need to receive it. Otherwise, it
             // goes directly to the ready postbox.
-            if (chunk.concat_data_size() > 0) {
+            if (concat_data_size > 0) {
                 if (!chunk.is_data_buffer_set()) {
                     // Create a new buffer and let the buffer resource decide the
                     // memory type.
                     chunk.set_data_buffer(allocate_buffer(
-                        chunk.concat_data_size(), shuffler_.stream_, shuffler_.br_
+                        concat_data_size, shuffler_.stream_, shuffler_.br_
                     ));
                     if (chunk.data_memory_type() == MemoryType::HOST) {
                         stats().add_bytes_stat(
-                            "spill-bytes-recv-to-host", chunk.concat_data_size()
+                            "spill-bytes-recv-to-host", concat_data_size
                         );
                     }
                 }
@@ -307,31 +311,33 @@ class Shuffler::Progress {
                 // At this point we know we can process this item, so extract it.
                 // Note: extract_item invalidates the iterator, so must increment
                 // here.
-                auto [src, chunk] = extract_item(incoming_chunks_, it++);
+                auto [e_src, e_chunk] = std::move(*it);
+                it = incoming_chunks_.erase(it);
 
                 // Setup to receive the chunk into `in_transit_*`.
                 // transfer the data buffer from the chunk to the future
                 auto future = shuffler_.comm_->recv(
-                    src, gpu_data_tag(), chunk.release_data_buffer()
+                    e_src, gpu_data_tag(), e_chunk.release_data_buffer()
                 );
                 RAPIDSMPF_EXPECTS(
-                    in_transit_futures_.insert({chunk.chunk_id(), std::move(future)})
+                    in_transit_futures_.insert({e_chunk.chunk_id(), std::move(future)})
                         .second,
                     "in transit future already exist"
                 );
+
                 RAPIDSMPF_EXPECTS(
-                    in_transit_chunks_.insert({chunk.chunk_id(), std::move(chunk)})
+                    in_transit_chunks_.insert({e_chunk.chunk_id(), std::move(e_chunk)})
                         .second,
                     "in transit chunk already exist"
                 );
                 shuffler_.statistics_->add_bytes_stat(
-                    "shuffle-payload-recv", chunk.concat_data_size()
+                    "shuffle-payload-recv", concat_data_size
                 );
                 // Tell the source of the chunk that we are ready to receive it.
                 // All partition IDs in the chunk must map to the same key (rank).
                 fire_and_forget_.push_back(shuffler_.comm_->send(
-                    ReadyForDataMessage{chunk.chunk_id()}.pack(),
-                    src,
+                    ReadyForDataMessage{chunk_id}.pack(),
+                    e_src,
                     ready_for_data_tag(),
                     shuffler_.br_
                 ));
@@ -339,7 +345,8 @@ class Shuffler::Progress {
                 // At this point we know we can process this item, so extract it.
                 // Note: extract_item invalidates the iterator, so must increment
                 // here.
-                auto [src, chunk] = extract_item(incoming_chunks_, it++);
+                auto [e_src, e_chunk] = std::move(*it);
+                it = incoming_chunks_.erase(it);
 
                 // iterate over all messages in the chunk
                 for (size_t i = 0; i < chunk.n_messages(); ++i) {
@@ -428,7 +435,7 @@ class Shuffler::Progress {
     Shuffler& shuffler_;
     std::vector<std::unique_ptr<Communicator::Future>>
         fire_and_forget_;  ///< Ongoing "fire-and-forget" operations (non-blocking sends).
-    std::multimap<Rank, detail::Chunk>
+    std::list<std::pair<Rank, detail::Chunk>>
         incoming_chunks_;  ///< Chunks ready to be received.
     std::unordered_map<detail::ChunkID, detail::Chunk>
         outgoing_chunks_;  ///< Chunks ready to be sent.
