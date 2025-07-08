@@ -7,8 +7,6 @@
 #include <memory>
 #include <stdexcept>
 #include <utility>
-#include <unordered_map>
-#include <map>
 
 #include <rapidsmpf/buffer/packed_data.hpp>
 #include <rapidsmpf/buffer/resource.hpp>
@@ -148,9 +146,7 @@ class Shuffler::Progress {
      *
      * @param shuffler Reference to the shuffler instance that this will progress.
      */
-    Progress(Shuffler& shuffler) : shuffler_(shuffler) {
-        // incoming_chunks_.reserve(static_cast<size_t>(shuffler_.comm_->nranks()));
-    }
+    Progress(Shuffler& shuffler) : shuffler_(shuffler) {}
 
     /**
      * @brief Executes a single iteration of the shuffler's event loop.
