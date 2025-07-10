@@ -259,6 +259,11 @@ class Shuffler::Progress {
                         chunk.set_data_buffer(allocate_buffer(
                             chunk.concat_data_size(), shuffler_.stream_, shuffler_.br_
                         ));
+                        std::cout
+                            << "Chunk data buffer set " << chunk.concat_data_size() << " "
+                            << (chunk.data_memory_type() == MemoryType::HOST ? "HOST"
+                                                                             : "DEVICE")
+                            << "ready: " << chunk.is_ready() << std::endl;
                         if (chunk.data_memory_type() == MemoryType::HOST) {
                             stats.add_bytes_stat(
                                 "spill-bytes-recv-to-host", chunk.concat_data_size()
@@ -270,6 +275,7 @@ class Shuffler::Progress {
                     if (!chunk.is_ready()) {
                         // Buffer is not ready yet, skip to next item
                         ++it;
+                        throw std::runtime_error("Buffer is not ready yet");
                         continue;
                     }
 

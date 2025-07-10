@@ -364,6 +364,64 @@ TEST_P(MemoryAvailable_NumPartition, round_trip_finished_grouped) {
     ));
 }
 
+TEST(Shuffler, recv_race_when_not_ready) {
+    if (GlobalEnvironment->comm_->nranks() != 2) {
+        GTEST_SKIP() << "test requires 2 ranks";
+    }
+    std::chrono::milliseconds const wait_timeout(30 * 1000);
+
+
+    auto stream = cudf::get_default_stream();
+    auto mr = cudf::get_current_device_resource_ref();
+    auto br = std::make_unique<rapidsmpf::BufferResource>(mr);
+    auto& comm = GlobalEnvironment->comm_;
+
+    auto pids = iota_vector<rapidsmpf::shuffler::PartID>(100);
+
+
+    rapidsmpf::shuffler::Shuffler shuffler(
+        comm, GlobalEnvironment->progress_thread_, 0, pids.size(), stream, br.get()
+    );
+
+    GlobalEnvironment->barrier();
+
+    std::unordered_map<rapidsmpf::shuffler::PartID, size_t> input_sizes{
+        {1, 100000000}, {3, 100000000}, {5, 100000000}, {7, 100000000}, {9, 100000000},
+        {11, 100000000}, {13, 100000000}, {15, 100000000}, {17, 100000000}, {19, 100000000}
+    };
+
+    // rank 0 sends
+    if (comm->rank() == 0) {
+        std::unordered_map<rapidsmpf::shuffler::PartID, rapidsmpf::PackedData> chunks;
+        chunks.reserve(input_sizes.size());
+        for (auto& [pid, size] : input_sizes) {
+            chunks[pid] = rapidsmpf::PackedData(
+                std::make_unique<std::vector<std::uint8_t>>(10),
+                std::make_unique<rmm::device_buffer>(size, stream)
+            );
+        }
+        // cudaStreamSynchronize(stream);
+
+        shuffler.insert(std::move(chunks));
+    }
+    GlobalEnvironment->barrier();
+
+    // both ranks insert finished for all partitions
+    shuffler.insert_finished(std::move(pids));
+
+    if (comm->rank() == 1) {
+        for(auto& [pid, size] : input_sizes) {
+            shuffler.wait_on(pid, wait_timeout);
+            SCOPED_TRACE("pid: " + std::to_string(pid));
+            EXPECT_TRUE(input_sizes.contains(pid));
+            auto packed_chunk = shuffler.extract(pid);
+            EXPECT_EQ(1, packed_chunk.size());
+            EXPECT_EQ(size, packed_chunk.at(0).gpu_data->size());
+            EXPECT_EQ(10, packed_chunk.at(0).metadata->size());
+        }
+    }
+}
+
 // Test that the same communicator can be used concurrently by multiple shufflers in
 // separate threads
 class ConcurrentShuffleTest
