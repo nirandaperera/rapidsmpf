@@ -94,14 +94,15 @@ TEST_P(NumOfPartitions, split_and_pack) {
     CUDF_TEST_EXPECT_TABLES_EQUIVALENT(expect, *result);
 }
 
-TEST(MetadataMessage, round_trip) {
+TEST(MetadataMessage, serialize_deserialize) {
     auto stream = cudf::get_default_stream();
 
     auto metadata = iota_vector<uint8_t>(100);
 
     auto expect = rapidsmpf::shuffler::detail::Chunk::from_packed_data(
         1,  // chunk_id
-        2,  // part_id
+        2,  // src_rank
+        3,  // part_id
         {std::make_unique<std::vector<uint8_t>>(metadata), nullptr},  // packed_data
         nullptr,  // event
         stream,
@@ -118,6 +119,7 @@ TEST(MetadataMessage, round_trip) {
     // They should be identical.
     EXPECT_EQ(expect.part_id(0), result.part_id(0));
     EXPECT_EQ(expect.chunk_id(), result.chunk_id());
+    EXPECT_EQ(expect.src_rank(), result.src_rank());
     EXPECT_EQ(expect.expected_num_chunks(0), result.expected_num_chunks(0));
     EXPECT_EQ(expect.concat_data_size(), result.concat_data_size());
     EXPECT_EQ(expect.concat_metadata_size(), result.concat_metadata_size());
@@ -906,8 +908,8 @@ TEST(FinishCounterTests, wait_some_with_timeout) {
 }
 
 namespace rapidsmpf::shuffler::detail {
-Chunk make_dummy_chunk(ChunkID chunk_id, PartID part_id) {
-    return Chunk(chunk_id, {part_id}, {0}, {0}, {0}, nullptr, nullptr);
+Chunk make_dummy_chunk(ChunkID chunk_id, Rank src_rank, PartID part_id) {
+    return Chunk(chunk_id, src_rank, {part_id}, {0}, {0}, {0}, nullptr, nullptr);
 }
 }  // namespace rapidsmpf::shuffler::detail
 
@@ -953,6 +955,7 @@ TEST_F(PostBoxTest, InsertAndExtractMultipleChunks) {
     for (uint32_t i = 0; i < num_chunks; ++i) {
         auto chunk = rapidsmpf::shuffler::detail::make_dummy_chunk(
             rapidsmpf::shuffler::detail::ChunkID{i},
+            rapidsmpf::Rank(0),  // src_rank
             rapidsmpf::shuffler::PartID{i % num_partitions}
         );
         postbox->insert(std::move(chunk));
@@ -996,6 +999,7 @@ TEST_F(PostBoxTest, ThreadSafety) {
             for (uint32_t j = 0; j < chunks_per_thread; ++j) {
                 auto chunk = rapidsmpf::shuffler::detail::make_dummy_chunk(
                     rapidsmpf::shuffler::detail::ChunkID{i * chunks_per_thread + j},
+                    rapidsmpf::Rank(0),  // src_rank
                     rapidsmpf::shuffler::PartID{j / chunks_per_partition}
                 );
                 postbox->insert(std::move(chunk));

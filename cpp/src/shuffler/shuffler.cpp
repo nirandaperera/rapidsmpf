@@ -510,7 +510,13 @@ detail::Chunk Shuffler::create_chunk(
     PartID pid, PackedData&& packed_data, std::shared_ptr<Buffer::Event> event
 ) {
     return detail::Chunk::from_packed_data(
-        get_new_cid(), pid, std::move(packed_data), std::move(event), stream_, br_
+        get_new_cid(),
+        comm_->rank(),
+        pid,
+        std::move(packed_data),
+        std::move(event),
+        stream_,
+        br_
     );
 }
 
@@ -698,7 +704,7 @@ void Shuffler::insert_finished(std::vector<PartID>&& pids) {
     // if pids only contains one element, we can just insert the finished chunk
     if (pids.size() == 1) {
         insert(detail::Chunk::from_finished_partition(
-            get_new_cid(), pids[0], expected_num_chunks[0] + 1
+            get_new_cid(), comm_->rank(), pids[0], expected_num_chunks[0] + 1
         ));
         return;
     }
@@ -715,11 +721,11 @@ void Shuffler::insert_finished(std::vector<PartID>&& pids) {
 
         if (target_rank == comm_->rank()) {  // no group for local chunks
             insert(Chunk::from_finished_partition(
-                get_new_cid(), pids[i], expected_num_chunks[i] + 1
+                get_new_cid(), comm_->rank(), pids[i], expected_num_chunks[i] + 1
             ));
         } else {
             chunk_groups[size_t(target_rank)].emplace_back(Chunk::from_finished_partition(
-                get_new_cid(), pids[i], expected_num_chunks[i] + 1
+                get_new_cid(), comm_->rank(), pids[i], expected_num_chunks[i] + 1
             ));
         }
     }

@@ -55,8 +55,9 @@ PackedData create_packed_data(
 
 TEST_F(ChunkTest, FromFinishedPartition) {
     ChunkID chunk_id = 123;
-    PartID part_id = 456;
-    size_t expected_num_chunks = 789;
+    Rank src_rank = 456;
+    PartID part_id = 789;
+    size_t expected_num_chunks = 1011;
 
     auto test_chunk = [&](Chunk& chunk) {
         EXPECT_EQ(chunk.chunk_id(), chunk_id);
@@ -66,9 +67,11 @@ TEST_F(ChunkTest, FromFinishedPartition) {
         EXPECT_TRUE(chunk.is_control_message(0));
         EXPECT_EQ(chunk.metadata_size(0), 0);
         EXPECT_EQ(chunk.data_size(0), 0);
+        EXPECT_EQ(chunk.src_rank(), src_rank);
     };
 
-    auto chunk = Chunk::from_finished_partition(chunk_id, part_id, expected_num_chunks);
+    auto chunk =
+        Chunk::from_finished_partition(chunk_id, src_rank, part_id, expected_num_chunks);
     test_chunk(chunk);
 
     auto msg = chunk.serialize();
@@ -78,12 +81,15 @@ TEST_F(ChunkTest, FromFinishedPartition) {
     auto chunk3 = chunk2.get_data(chunk_id, 0, stream, br.get());
     test_chunk(chunk3);
 
-    EXPECT_THROW(chunk3.get_data(chunk_id, 1, stream, br.get()), std::out_of_range);
+    EXPECT_THROW(
+        std::ignore = chunk3.get_data(chunk_id, 1, stream, br.get()), std::out_of_range
+    );
 }
 
 TEST_F(ChunkTest, FromPackedData) {
     ChunkID chunk_id = 123;
-    PartID part_id = 456;
+    Rank src_rank = 456;
+    PartID part_id = 789;
 
     // Create test metadata
     auto metadata =
@@ -108,11 +114,12 @@ TEST_F(ChunkTest, FromPackedData) {
         EXPECT_FALSE(chunk.is_control_message(0));
         EXPECT_EQ(chunk.metadata_size(0), 4);
         EXPECT_EQ(chunk.data_size(0), 4);
+        EXPECT_EQ(chunk.src_rank(), src_rank);
     };
 
     // no need of an event because cuda buffer copy is synchronous
     auto chunk = Chunk::from_packed_data(
-        chunk_id, part_id, std::move(packed_data), nullptr, stream, br.get()
+        chunk_id, src_rank, part_id, std::move(packed_data), nullptr, stream, br.get()
     );
     test_chunk(chunk);
 
@@ -123,16 +130,21 @@ TEST_F(ChunkTest, FromPackedData) {
 
     auto chunk3 = chunk2.get_data(chunk_id, 0, stream, br.get());
     test_chunk(chunk3);
+
+    EXPECT_THROW(
+        std::ignore = chunk3.get_data(chunk_id, 1, stream, br.get()), std::out_of_range
+    );
 }
 
 TEST_F(ChunkTest, ChunkConcatControlMessages) {
     ChunkID chunk_id = 123;
+    Rank src_rank = 456;
     std::vector<Chunk> chunks;
 
     // Create three control message chunks
-    chunks.push_back(Chunk::from_finished_partition(0, 1, 10));
-    chunks.push_back(Chunk::from_finished_partition(0, 2, 20));
-    chunks.push_back(Chunk::from_finished_partition(0, 3, 30));
+    chunks.push_back(Chunk::from_finished_partition(0, src_rank, 1, 10));
+    chunks.push_back(Chunk::from_finished_partition(0, src_rank, 2, 20));
+    chunks.push_back(Chunk::from_finished_partition(0, src_rank, 3, 30));
 
     auto concat_chunk = Chunk::concat(std::move(chunks), chunk_id, stream, br.get());
 
@@ -147,6 +159,7 @@ TEST_F(ChunkTest, ChunkConcatControlMessages) {
         EXPECT_TRUE(concat_chunk.is_control_message(i));
         EXPECT_EQ(concat_chunk.metadata_size(i), 0);
         EXPECT_EQ(concat_chunk.data_size(i), 0);
+        EXPECT_EQ(concat_chunk.src_rank(), src_rank);
     };
 
     test_message(0, 1, 10);
@@ -164,16 +177,18 @@ TEST_F(ChunkTest, ChunkConcatPackedData) {
 
     // Create two chunks with packed data using spans
     chunks.push_back(Chunk::from_packed_data(
-        0,
-        1,
+        0,  // chunk_id
+        0,  // src_rank
+        1,  // part_id
         create_packed_data({metadata.data(), 3}, {data.data(), 3}, stream),
         nullptr,
         stream,
         br.get()
     ));
     chunks.push_back(Chunk::from_packed_data(
-        0,
-        2,
+        0,  // chunk_id
+        0,  // src_rank
+        2,  // part_id
         create_packed_data({metadata.data() + 3, 2}, {data.data() + 3, 2}, stream),
         nullptr,
         stream,
@@ -217,7 +232,7 @@ TEST_F(ChunkTest, ChunkConcatPackedData) {
 }
 
 std::tuple<Chunk, std::vector<uint8_t>, std::vector<uint8_t>, size_t> make_mixed_chunk(
-    ChunkID chunk_id, rmm::cuda_stream_view stream, BufferResource* br
+    ChunkID chunk_id, Rank src_rank, rmm::cuda_stream_view stream, BufferResource* br
 ) {
     std::vector<Chunk> chunks;
 
@@ -226,35 +241,41 @@ std::tuple<Chunk, std::vector<uint8_t>, std::vector<uint8_t>, size_t> make_mixed
     std::vector<uint8_t> data{6, 7, 8, 9, 10};
 
     // Create chunks with mixed message types
-    chunks.push_back(Chunk::from_finished_partition(0, 1, 10));  // control message
+    chunks.push_back(Chunk::from_finished_partition(0, src_rank, 1, 10)
+    );  // control message
     chunks.push_back(Chunk::from_packed_data(
-        0,
-        2,
+        0,  // chunk_id
+        src_rank,
+        2,  // part_id
         create_packed_data({metadata.data(), 3}, {data.data(), 3}, stream),
         nullptr,
         stream,
         br
     ));  // packed data
     chunks.push_back(Chunk::from_packed_data(
-        0,
-        3,
+        0,  // chunk_id
+        src_rank,
+        3,  // part_id
         create_packed_data({metadata.data() + 5, 0}, {data.data() + 5, 0}, stream),
         nullptr,
         stream,
         br
     ));  // empty packed data - non-null
-    chunks.push_back(Chunk::from_finished_partition(0, 4, 20));  // control message
+    chunks.push_back(Chunk::from_finished_partition(0, src_rank, 4, 20)
+    );  // control message
     chunks.push_back(Chunk::from_packed_data(
-        0,
-        5,
+        0,  // chunk_id
+        src_rank,
+        5,  // part_id
         create_packed_data({metadata.data() + 3, 2}, {data.data() + 3, 2}, stream),
         nullptr,
         stream,
         br
     ));  // packed data
     chunks.push_back(Chunk::from_packed_data(
-        0,
-        6,
+        0,  // chunk_id
+        src_rank,
+        6,  // part_id
         PackedData{
             std::make_unique<std::vector<uint8_t>>(metadata.begin() + 5, metadata.end()),
             nullptr
@@ -271,9 +292,9 @@ std::tuple<Chunk, std::vector<uint8_t>, std::vector<uint8_t>, size_t> make_mixed
 
 TEST_F(ChunkTest, ChunkConcatMixedMessages) {
     ChunkID chunk_id = 123;
-
+    Rank src_rank = 456;
     auto [concat_chunk, metadata, data, count] =
-        make_mixed_chunk(chunk_id, stream, br.get());
+        make_mixed_chunk(chunk_id, src_rank, stream, br.get());
 
     // Verify the concatenated chunk properties
     EXPECT_EQ(concat_chunk.chunk_id(), chunk_id);
@@ -300,6 +321,7 @@ TEST_F(ChunkTest, ChunkConcatMixedMessages) {
         EXPECT_EQ(chunk_copy.is_control_message(0), is_control);
         EXPECT_EQ(chunk_copy.metadata_size(0), meta_size);
         EXPECT_EQ(chunk_copy.data_size(0), data_size);
+        EXPECT_EQ(chunk_copy.src_rank(), src_rank);
     };
 
     test_message(0, 1, 10, true, 0, 0);  // control message
@@ -327,10 +349,11 @@ TEST_F(ChunkTest, ChunkConcatMixedMessages) {
 }
 
 TEST_F(ChunkTest, ChunkConcatMixedMessagesMultiple) {
+    Rank src_rank = 456;
     auto [concat_chunk1, metadata1, data1, count1] =
-        make_mixed_chunk(0, stream, br.get());
+        make_mixed_chunk(0, src_rank, stream, br.get());
     auto [concat_chunk2, metadata2, data2, count2] =
-        make_mixed_chunk(1, stream, br.get());
+        make_mixed_chunk(1, src_rank, stream, br.get());
 
     std::vector<Chunk> chunks;
     chunks.push_back(std::move(concat_chunk1));
@@ -341,6 +364,7 @@ TEST_F(ChunkTest, ChunkConcatMixedMessagesMultiple) {
     // Verify the concatenated chunk properties
     EXPECT_EQ(concat_chunk.chunk_id(), 2);
     EXPECT_EQ(concat_chunk.n_messages(), count1 + count2);
+    EXPECT_EQ(concat_chunk.src_rank(), src_rank);
 
     // Verify the concatenated metadata and data
     auto released_metadata = concat_chunk.release_metadata_buffer();
@@ -370,6 +394,7 @@ TEST_F(ChunkTest, ChunkConcatMixedMessagesMultiple) {
 
 TEST_F(ChunkTest, ChunkConcatSingleChunk) {
     ChunkID chunk_id = 123;
+    Rank src_rank = 456;
     std::vector<Chunk> chunks;
 
     // Create a single chunk with packed data
@@ -380,9 +405,9 @@ TEST_F(ChunkTest, ChunkConcatSingleChunk) {
     auto expected_metadata_ptr = packed_data.metadata->data();
     auto expected_data_ptr = packed_data.gpu_data->data();
 
-    chunks.push_back(
-        Chunk::from_packed_data(0, 1, std::move(packed_data), nullptr, stream, br.get())
-    );
+    chunks.push_back(Chunk::from_packed_data(
+        0, src_rank, 1, std::move(packed_data), nullptr, stream, br.get()
+    ));
 
     auto concat_chunk = Chunk::concat(std::move(chunks), chunk_id, stream, br.get());
 
@@ -434,6 +459,7 @@ TEST_F(ChunkTest, ChunkConcatHostBufferAllocation) {
     );
 
     ChunkID chunk_id = 123;
+    Rank src_rank = 456;
 
     // Create test metadata and data
     std::vector<uint8_t> metadata{1, 2, 3, 7, 8};  // Concatenated metadata
@@ -443,10 +469,22 @@ TEST_F(ChunkTest, ChunkConcatHostBufferAllocation) {
     // single chunk
     std::vector<Chunk> chunks;
     chunks.push_back(Chunk::from_packed_data(
-        1, 1, create_packed_data(metadata, data, stream), nullptr, stream, br.get()
+        1,
+        src_rank,
+        1,
+        create_packed_data(metadata, data, stream),
+        nullptr,
+        stream,
+        br.get()
     ));
     chunks.push_back(Chunk::from_packed_data(
-        2, 2, create_packed_data(metadata, data, stream), nullptr, stream, br.get()
+        2,
+        src_rank,
+        2,
+        create_packed_data(metadata, data, stream),
+        nullptr,
+        stream,
+        br.get()
     ));
     auto chunk = Chunk::concat(std::move(chunks), chunk_id, stream, br.get());
 
@@ -455,6 +493,7 @@ TEST_F(ChunkTest, ChunkConcatHostBufferAllocation) {
 
 TEST_F(ChunkTest, ChunkConcatPreferredMemoryType) {
     ChunkID chunk_id = 123;
+    Rank src_rank = 456;
 
     // Create test metadata and data
     std::vector<uint8_t> metadata{1, 2, 3, 7, 8};  // Concatenated metadata
@@ -462,18 +501,42 @@ TEST_F(ChunkTest, ChunkConcatPreferredMemoryType) {
     auto gen_chunks = [&] {
         std::vector<Chunk> chunks;
         chunks.push_back(Chunk::from_packed_data(
-            1, 1, create_packed_data(metadata, data, stream), nullptr, stream, br.get()
+            1,
+            src_rank,
+            1,
+            create_packed_data(metadata, data, stream),
+            nullptr,
+            stream,
+            br.get()
         ));
         chunks.push_back(Chunk::from_packed_data(
-            2, 2, create_packed_data(metadata, data, stream), nullptr, stream, br.get()
+            2,
+            src_rank,
+            2,
+            create_packed_data(metadata, data, stream),
+            nullptr,
+            stream,
+            br.get()
         ));
         return chunks;
     };
 
     // test with both memory types
-    for (auto mem_type : {MemoryType::HOST, MemoryType::DEVICE}) {
+    for (auto mem_type : rapidsmpf::MEMORY_TYPES) {
         SCOPED_TRACE("mem_type: " + std::to_string(static_cast<int>(mem_type)));
         auto chunk = Chunk::concat(gen_chunks(), chunk_id, stream, br.get(), mem_type);
         EXPECT_EQ(mem_type, chunk.data_memory_type());
     }
+}
+
+// concatenating chunks with different src ranks should throw an error
+TEST_F(ChunkTest, ChunkConcatDifferentSrcRanks) {
+    ChunkID chunk_id = 123;
+    std::vector<Chunk> chunks;
+    chunks.push_back(Chunk::from_finished_partition(0, 0, 1, 10));
+    chunks.push_back(Chunk::from_finished_partition(0, 1, 1, 10));
+    EXPECT_THROW(
+        std::ignore = Chunk::concat(std::move(chunks), chunk_id, stream, br.get()),
+        std::logic_error
+    );
 }

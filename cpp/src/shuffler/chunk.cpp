@@ -16,6 +16,7 @@ namespace rapidsmpf::shuffler::detail {
 
 Chunk::Chunk(
     ChunkID chunk_id,
+    Rank src_rank,
     std::vector<PartID> part_ids,
     std::vector<size_t> expected_num_chunks,
     std::vector<uint32_t> meta_offsets,
@@ -24,6 +25,7 @@ Chunk::Chunk(
     std::unique_ptr<Buffer> data
 )
     : chunk_id_{chunk_id},
+      src_rank_{src_rank},
       part_ids_{std::move(part_ids)},
       expected_num_chunks_{std::move(expected_num_chunks)},
       meta_offsets_{std::move(meta_offsets)},
@@ -40,61 +42,52 @@ Chunk::Chunk(
 
 Chunk Chunk::get_data(
     ChunkID new_chunk_id, size_t i, rmm::cuda_stream_view stream, BufferResource* br
-) {
+) const {
     RAPIDSMPF_EXPECTS(i < n_messages(), "index out of bounds", std::out_of_range);
 
     if (is_control_message(i)) {
-        return from_finished_partition(new_chunk_id, part_id(i), expected_num_chunks(i));
+        return from_finished_partition(
+            new_chunk_id, src_rank_, part_id(i), expected_num_chunks(i)
+        );
     }
 
-    if (n_messages() == 1) {
-        // If there is only one message, move the metadata and data to the new chunk.
-        return Chunk(
-            new_chunk_id,
-            {part_ids_[0]},
-            {expected_num_chunks_[0]},
-            {meta_offsets_[0]},
-            {data_offsets_[0]},
-            std::move(metadata_),
-            data_ ? std::move(data_) : br->allocate_empty_host_buffer()
-        );
+    // copy the metadata to the new chunk
+    uint32_t meta_slice_size = metadata_size(i);
+    std::ptrdiff_t meta_slice_offset =
+        (i == 0 ? 0 : std::ptrdiff_t(meta_offsets_[i - 1]));
+    std::vector<uint8_t> meta_slice(meta_slice_size);
+    std::memcpy(
+        meta_slice.data(), metadata_->data() + meta_slice_offset, meta_slice_size
+    );
+
+    // copy the data to the new chunk
+    size_t data_slice_size = data_size(i);
+    std::unique_ptr<Buffer> data_slice;
+    if (data_slice_size == 0) {
+        data_slice = br->allocate_empty_host_buffer();
     } else {
-        // copy the metadata to the new chunk
-        uint32_t meta_slice_size = metadata_size(i);
-        std::ptrdiff_t meta_slice_offset =
-            (i == 0 ? 0 : std::ptrdiff_t(meta_offsets_[i - 1]));
-        std::vector<uint8_t> meta_slice(meta_slice_size);
-        std::memcpy(
-            meta_slice.data(), metadata_->data() + meta_slice_offset, meta_slice_size
-        );
-
-        // copy the data to the new chunk
-        size_t data_slice_size = data_size(i);
-        std::unique_ptr<Buffer> data_slice;
-        if (data_slice_size == 0) {
-            data_slice = br->allocate_empty_host_buffer();
-        } else {
-            std::ptrdiff_t data_slice_offset =
-                (i == 0 ? 0 : std::ptrdiff_t(data_offsets_[i - 1]));
-            auto reserve = reserve_or_fail(br, data_slice_size);
-            data_slice =
-                data_->copy_slice(data_slice_offset, data_slice_size, reserve, stream);
-        }
-
-        return {
-            new_chunk_id,
-            {part_ids_[i]},
-            {0},
-            {meta_slice_size},
-            {data_slice_size},
-            std::make_unique<std::vector<uint8_t>>(std::move(meta_slice)),
-            std::move(data_slice)
-        };
+        std::ptrdiff_t data_slice_offset =
+            (i == 0 ? 0 : std::ptrdiff_t(data_offsets_[i - 1]));
+        auto reserve = reserve_or_fail(br, data_slice_size);
+        data_slice =
+            data_->copy_slice(data_slice_offset, data_slice_size, reserve, stream);
     }
+
+    return {
+        new_chunk_id,
+        src_rank_,
+        {part_ids_[i]},
+        {0},
+        {meta_slice_size},
+        {data_slice_size},
+        std::make_unique<std::vector<uint8_t>>(std::move(meta_slice)),
+        std::move(data_slice)
+    };
 }
 
 Chunk Chunk::from_packed_data(
     ChunkID chunk_id,
+    Rank src_rank,
     PartID part_id,
     PackedData&& packed_data,
     std::shared_ptr<Buffer::Event> event,
@@ -112,6 +105,7 @@ Chunk Chunk::from_packed_data(
 
     return {
         chunk_id,
+        src_rank,
         {part_id},
         {0},  // expected_num_chunks
         std::move(meta_offsets),
@@ -124,9 +118,9 @@ Chunk Chunk::from_packed_data(
 }
 
 Chunk Chunk::from_finished_partition(
-    ChunkID chunk_id, PartID part_id, size_t expected_num_chunks
+    ChunkID chunk_id, Rank src_rank, PartID part_id, size_t expected_num_chunks
 ) {
-    return {chunk_id, {part_id}, {expected_num_chunks}, {0}, {0}};
+    return {chunk_id, src_rank, {part_id}, {expected_num_chunks}, {0}, {0}};
 }
 
 Chunk Chunk::deserialize(std::vector<uint8_t> const& msg, bool validate) {
@@ -140,6 +134,10 @@ Chunk Chunk::deserialize(std::vector<uint8_t> const& msg, bool validate) {
     ChunkID chunk_id;
     std::memcpy(&chunk_id, msg.data() + offset, sizeof(ChunkID));
     offset += sizeof(ChunkID);
+
+    Rank src_rank;
+    std::memcpy(&src_rank, msg.data() + offset, sizeof(Rank));
+    offset += sizeof(Rank);
 
     size_t n_messages;
     std::memcpy(&n_messages, msg.data() + offset, sizeof(size_t));
@@ -169,6 +167,7 @@ Chunk Chunk::deserialize(std::vector<uint8_t> const& msg, bool validate) {
 
     return {
         chunk_id,
+        src_rank,
         std::move(part_ids),
         std::move(expected_num_chunks),
         std::move(meta_offsets),
@@ -179,14 +178,19 @@ Chunk Chunk::deserialize(std::vector<uint8_t> const& msg, bool validate) {
 }
 
 bool Chunk::validate_format(std::vector<uint8_t> const& serialized_buf) {
+    // header size for a metadata message if it had no messages
+    constexpr size_t metadata_fixed_header_size = metadata_message_header_size(0);
+
     // Check if buffer is large enough to contain at least the header
-    if (serialized_buf.size() < sizeof(ChunkID) + sizeof(size_t)) {
+    if (serialized_buf.size() < metadata_fixed_header_size) {
         return false;
     }
 
     // Get number of messages
     size_t n = 0;
-    std::memcpy(&n, serialized_buf.data() + sizeof(ChunkID), sizeof(size_t));
+    std::memcpy(
+        &n, serialized_buf.data() + metadata_fixed_header_size - sizeof(n), sizeof(n)
+    );
 
     if (n == 0) {  // no messages
         return false;
@@ -201,7 +205,7 @@ bool Chunk::validate_format(std::vector<uint8_t> const& serialized_buf) {
     // For each message, validate the metadata and data sizes
     uint8_t const* meta_offsets_start =
         serialized_buf.data()
-        + (sizeof(ChunkID) + sizeof(size_t) + n * (sizeof(PartID) + sizeof(size_t)));
+        + (metadata_fixed_header_size + n * (sizeof(PartID) + sizeof(size_t)));
     uint8_t const* data_offsets_start = meta_offsets_start + n * sizeof(uint32_t);
 
     // Check if prefix sums are non-decreasing
@@ -255,11 +259,21 @@ Chunk Chunk::concat(
     std::optional<MemoryType> preferred_mem_type
 ) {
     RAPIDSMPF_EXPECTS(!chunks.empty(), "cannot concatenate empty vector of chunks");
+    Rank const src_rank = chunks[0].src_rank_;
+    RAPIDSMPF_EXPECTS(
+        std::all_of(
+            chunks.begin() + 1,
+            chunks.end(),
+            [&src_rank](Chunk const& chunk) { return chunk.src_rank_ == src_rank; }
+        ),
+        "source rank mismatch"
+    );
 
     // If there's only one chunk, just return it with the new chunk ID
     if (chunks.size() == 1) {
         return Chunk(
             chunk_id,
+            src_rank,
             std::move(chunks[0].part_ids_),
             std::move(chunks[0].expected_num_chunks_),
             std::move(chunks[0].meta_offsets_),
@@ -381,6 +395,7 @@ Chunk Chunk::concat(
 
     return Chunk(
         chunk_id,
+        src_rank,
         std::move(part_ids),
         std::move(expected_num_chunks),
         std::move(meta_offsets),
@@ -418,6 +433,10 @@ std::unique_ptr<std::vector<uint8_t>> Chunk::serialize() const {
     // Write chunk ID
     std::memcpy(p, &chunk_id_, sizeof(ChunkID));
     p += sizeof(ChunkID);
+
+    // Write source rank
+    std::memcpy(p, &src_rank_, sizeof(Rank));
+    p += sizeof(Rank);
 
     // Write number of messages
     std::memcpy(p, &n, sizeof(size_t));
