@@ -9,174 +9,125 @@
 #include <vector>
 
 #include <benchmark/benchmark.h>
+#include <cuda_runtime.h>
+
+#include <rmm/cuda_stream_view.hpp>
+#include <rmm/device_buffer.hpp>
+#include <rmm/mr/cuda_memory_resource.hpp>
+
+#include <rapidsmpf/error.hpp>
 
 /**
- * @brief Benchmark to compare std::vector<uint8_t> creation vs std::allocator allocation.
+ * @brief Benchmark to compare host allocation methods with device-to-host memory copy.
  *
- * The key difference: std::vector constructor zero-initializes the memory region,
- * while std::allocator::allocate does not initialize memory. This benchmark
- * measures the performance impact of that zero-initialization.
+ * Each benchmark creates a RMM device vector outside the timing loop, then measures
+ * the combined performance of:
+ * 1. Host buffer allocation (with or without initialization depending on method)
+ * 2. cudaMemcpy from device to host
  *
  * All benchmarks exclude deallocation/destruction from timing to focus on
- * the allocation and initialization overhead.
+ * the allocation and memory copy overhead.
  */
+
+void run_benchmark(benchmark::State& state, auto&& alloc, auto&& dealloc) {
+    const auto size = static_cast<size_t>(state.range(0));
+
+    auto device_mr = std::make_unique<rmm::mr::cuda_memory_resource>();
+    rmm::cuda_stream_view stream = rmm::cuda_stream_default;
+
+    // Allocate device memory
+    rmm::device_buffer device_buffer(size, stream, device_mr.get());
+    // Initialize device memory
+    RAPIDSMPF_CUDA_TRY(cudaMemsetAsync(device_buffer.data(), 100, size, stream));
+    stream.synchronize();
+
+    for (auto _ : state) {
+        auto* ptr = alloc(size);
+        RAPIDSMPF_CUDA_TRY(
+            cudaMemcpy(ptr, device_buffer.data(), size, cudaMemcpyDeviceToHost)
+        );
+
+        benchmark::DoNotOptimize(ptr);
+        benchmark::ClobberMemory();
+
+        state.PauseTiming();
+        dealloc(ptr, size);
+        state.ResumeTiming();
+    }
+
+    state.SetBytesProcessed(int64_t(state.iterations()) * int64_t(size));
+}
 
 // Benchmark vector creation with sized constructor
 // Vector constructor will zero-initialize the memory
 static void BM_Vector_Create_ZeroInit(benchmark::State& state) {
-    const auto size = static_cast<size_t>(state.range(0));
-
-    for (auto _ : state) {
-        auto vec = std::make_unique<std::vector<uint8_t>>(size);
-        auto* ptr = vec->data();
-        benchmark::DoNotOptimize(ptr);
-        benchmark::ClobberMemory();
-
-        state.PauseTiming();
-        vec.reset();  // Deallocation not timed
-        state.ResumeTiming();
-    }
-
-    state.SetBytesProcessed(int64_t(state.iterations()) * int64_t(size));
-    state.SetLabel("vector create (zero-init)");
-}
-
-// Benchmark vector creation with reserve (no initialization)
-// This only allocates capacity without constructing elements
-static void BM_Vector_Reserve_NoInit(benchmark::State& state) {
-    const auto size = static_cast<size_t>(state.range(0));
-
-    for (auto _ : state) {
-        auto vec = std::make_unique<std::vector<uint8_t>>();
-        vec->reserve(size);
-        auto* ptr = vec->data();
-        benchmark::DoNotOptimize(ptr);
-        benchmark::ClobberMemory();
-
-        state.PauseTiming();
-        vec.reset();  // Deallocation not timed
-        state.ResumeTiming();
-    }
-
-    state.SetBytesProcessed(int64_t(state.iterations()) * int64_t(size));
-    state.SetLabel("vector reserve (no init)");
-}
-
-// Benchmark vector resize (will zero-initialize)
-// resize() allocates and value-initializes elements
-static void BM_Vector_Resize_ZeroInit(benchmark::State& state) {
-    const auto size = static_cast<size_t>(state.range(0));
-
-    for (auto _ : state) {
-        auto vec = std::make_unique<std::vector<uint8_t>>();
-        vec->resize(size);
-        auto* ptr = vec->data();
-        benchmark::DoNotOptimize(ptr);
-        benchmark::ClobberMemory();
-
-        state.PauseTiming();
-        vec.reset();  // Deallocation not timed
-        state.ResumeTiming();
-    }
-
-    state.SetBytesProcessed(int64_t(state.iterations()) * int64_t(size));
-    state.SetLabel("vector resize (zero-init)");
+    std::unique_ptr<std::vector<uint8_t>> vec;
+    run_benchmark(
+        state,
+        [&vec](size_t size) {
+            vec = std::make_unique<std::vector<uint8_t>>(size);
+            return vec->data();
+        },
+        [&vec](uint8_t*, size_t) { vec.reset(); }
+    );
+    state.SetLabel("vector create (zero-init) + cudaMemcpy");
 }
 
 // Benchmark raw allocator allocation (no initialization)
 static void BM_Allocator_Allocate_NoInit(benchmark::State& state) {
-    const auto size = static_cast<size_t>(state.range(0));
     std::allocator<uint8_t> alloc;
-
-    for (auto _ : state) {
-        uint8_t* ptr = alloc.allocate(size);
-        benchmark::DoNotOptimize(ptr);
-        benchmark::ClobberMemory();
-
-        state.PauseTiming();
-        alloc.deallocate(ptr, size);  // Deallocation not timed
-        state.ResumeTiming();
-    }
-
-    state.SetBytesProcessed(int64_t(state.iterations()) * int64_t(size));
-    state.SetLabel("allocator allocate (no init)");
+    run_benchmark(
+        state,
+        [&alloc](size_t size) { return alloc.allocate(size); },
+        [&alloc](uint8_t* ptr, size_t size) { alloc.deallocate(ptr, size); }
+    );
+    state.SetLabel("allocator allocate (no init) + cudaMemcpy");
 }
 
 // Benchmark raw allocator with explicit zero initialization
 static void BM_Allocator_Allocate_ZeroInit(benchmark::State& state) {
-    const auto size = static_cast<size_t>(state.range(0));
     std::allocator<uint8_t> alloc;
-
-    for (auto _ : state) {
-        uint8_t* ptr = alloc.allocate(size);
-        // Explicitly zero-initialize like vector does
-        std::fill_n(ptr, size, uint8_t{0});
-        benchmark::DoNotOptimize(ptr);
-        benchmark::ClobberMemory();
-
-        state.PauseTiming();
-        alloc.deallocate(ptr, size);  // Deallocation not timed
-        state.ResumeTiming();
-    }
-
-    state.SetBytesProcessed(int64_t(state.iterations()) * int64_t(size));
-    state.SetLabel("allocator allocate + zero-init");
+    run_benchmark(
+        state,
+        [&alloc](size_t size) {
+            auto* ptr = alloc.allocate(size);
+            std::fill_n(ptr, size, uint8_t{0});
+            return ptr;
+        },
+        [&alloc](uint8_t* ptr, size_t size) { alloc.deallocate(ptr, size); }
+    );
+    state.SetLabel("allocator allocate + zero-init + cudaMemcpy");
 }
 
 // Benchmark raw new[] operator (no initialization)
 static void BM_New_NoInit(benchmark::State& state) {
-    const auto size = static_cast<size_t>(state.range(0));
-
-    for (auto _ : state) {
-        auto* ptr = new uint8_t[size];
-        benchmark::DoNotOptimize(ptr);
-        benchmark::ClobberMemory();
-
-        state.PauseTiming();
-        delete[] ptr;  // Deallocation not timed
-        state.ResumeTiming();
-    }
-
-    state.SetBytesProcessed(int64_t(state.iterations()) * int64_t(size));
-    state.SetLabel("new[] (no init)");
+    run_benchmark(
+        state,
+        [](size_t size) { return new uint8_t[size]; },
+        [](uint8_t* ptr, size_t) { delete[] ptr; }
+    );
+    state.SetLabel("new[] (no init) + cudaMemcpy");
 }
 
 // Benchmark raw new[] with value initialization (zero-init)
 static void BM_New_ZeroInit(benchmark::State& state) {
-    const auto size = static_cast<size_t>(state.range(0));
-
-    for (auto _ : state) {
-        // Use () for value initialization which zero-initializes
-        auto* ptr = new uint8_t[size]();
-        benchmark::DoNotOptimize(ptr);
-        benchmark::ClobberMemory();
-
-        state.PauseTiming();
-        delete[] ptr;  // Deallocation not timed
-        state.ResumeTiming();
-    }
-
-    state.SetBytesProcessed(int64_t(state.iterations()) * int64_t(size));
-    state.SetLabel("new[] (zero-init)");
+    run_benchmark(
+        state,
+        [](size_t size) { return new uint8_t[size](); },
+        [](uint8_t* ptr, size_t) { delete[] ptr; }
+    );
+    state.SetLabel("new[] (zero-init) + cudaMemcpy");
 }
 
 // Benchmark calloc (allocates and zero-initializes)
 // calloc is a C function that allocates memory and initializes it to zero
 static void BM_Calloc_ZeroInit(benchmark::State& state) {
-    const auto size = static_cast<size_t>(state.range(0));
-
-    for (auto _ : state) {
-        void* ptr = std::calloc(size, 1);  // Allocate size bytes, zero-initialized
-        benchmark::DoNotOptimize(ptr);
-        benchmark::ClobberMemory();
-
-        state.PauseTiming();
-        std::free(ptr);  // Deallocation not timed
-        state.ResumeTiming();
-    }
-
-    state.SetBytesProcessed(int64_t(state.iterations()) * int64_t(size));
-    state.SetLabel("calloc (zero-init)");
+    run_benchmark(
+        state,
+        [](size_t size) { return std::calloc(size, 1); },
+        [](void* ptr, size_t) { std::free(ptr); }
+    );
+    state.SetLabel("calloc (zero-init) + cudaMemcpy");
 }
 
 // Custom argument generator for the benchmark
@@ -220,16 +171,6 @@ void CustomArguments(benchmark::internal::Benchmark* b) {
 
 // Register the benchmarks
 BENCHMARK(BM_Vector_Create_ZeroInit)
-    ->Apply(CustomArguments)
-    ->UseRealTime()
-    ->Unit(benchmark::kMicrosecond);
-
-BENCHMARK(BM_Vector_Reserve_NoInit)
-    ->Apply(CustomArguments)
-    ->UseRealTime()
-    ->Unit(benchmark::kMicrosecond);
-
-BENCHMARK(BM_Vector_Resize_ZeroInit)
     ->Apply(CustomArguments)
     ->UseRealTime()
     ->Unit(benchmark::kMicrosecond);
