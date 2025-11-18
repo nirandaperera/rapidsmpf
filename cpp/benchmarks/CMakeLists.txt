@@ -126,6 +126,28 @@ install(
   EXCLUDE_FROM_ALL
 )
 
+add_executable(bench_vector_vs_allocator "bench_vector_vs_allocator.cpp")
+set_target_properties(
+  bench_vector_vs_allocator
+  PROPERTIES RUNTIME_OUTPUT_DIRECTORY "$<BUILD_INTERFACE:${RAPIDSMPF_BINARY_DIR}/benchmarks>"
+             CXX_STANDARD 20
+             CXX_STANDARD_REQUIRED ON
+             CXX_EXTENSIONS ON
+)
+target_compile_options(
+  bench_vector_vs_allocator PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${RAPIDSMPF_CXX_FLAGS}>"
+)
+target_link_libraries(
+  bench_vector_vs_allocator PRIVATE benchmark::benchmark benchmark::benchmark_main
+                                    $<TARGET_NAME_IF_EXISTS:conda_env> maybe_asan
+)
+install(
+  TARGETS bench_vector_vs_allocator
+  COMPONENT benchmarking
+  DESTINATION bin/benchmarks/librapidsmpf
+  EXCLUDE_FROM_ALL
+)
+
 if(RAPIDSMPF_HAVE_STREAMING)
   add_subdirectory(streaming)
 endif()
