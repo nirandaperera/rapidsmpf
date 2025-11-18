@@ -143,7 +143,7 @@ target_compile_options(
 )
 target_link_libraries(
   bench_vector_vs_allocator PRIVATE rapidsmpf::rapidsmpf rmm::rmm benchmark::benchmark benchmark::benchmark_main
-                                    $<TARGET_NAME_IF_EXISTS:conda_env> maybe_asan
+                                    $<TARGET_NAME_IF_EXISTS:conda_env> maybe_asan bench_utils
 )
 install(
   TARGETS bench_vector_vs_allocator

@@ -12,10 +12,12 @@
 #include <cuda_runtime.h>
 
 #include <rmm/cuda_stream_view.hpp>
-#include <rmm/device_buffer.hpp>
+#include <rmm/device_uvector.hpp>
 #include <rmm/mr/cuda_memory_resource.hpp>
 
 #include <rapidsmpf/error.hpp>
+
+#include "utils/random_data.hpp"
 
 /**
  * @brief Benchmark to compare host allocation methods with device-to-host memory copy.
@@ -36,9 +38,14 @@ void run_benchmark(benchmark::State& state, auto&& alloc, auto&& dealloc) {
     rmm::cuda_stream_view stream = rmm::cuda_stream_default;
 
     // Allocate device memory
-    rmm::device_buffer device_buffer(size, stream, device_mr.get());
+    rmm::device_uvector<int> device_buffer = random_device_vector(
+        static_cast<cudf::size_type>(size / sizeof(int)),
+        0,
+        std::numeric_limits<int>::max(),
+        stream,
+        *device_mr
+    );
     // Initialize device memory
-    RAPIDSMPF_CUDA_TRY(cudaMemsetAsync(device_buffer.data(), 100, size, stream));
     stream.synchronize();
 
     for (auto _ : state) {
