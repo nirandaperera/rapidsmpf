@@ -9,6 +9,7 @@
 
 #include <rapidsmpf/integrations/cudf/utils.hpp>
 #include <rapidsmpf/memory/buffer.hpp>
+#include <rapidsmpf/memory/host_buffer.hpp>
 #include <rapidsmpf/streaming/cudf/table_chunk.hpp>
 
 namespace rapidsmpf::streaming {
@@ -149,8 +150,26 @@ TableChunk TableChunk::copy(MemoryReservation& reservation) const {
                 br->release(reservation, data_alloc_size(MemoryType::DEVICE));
                 return TableChunk(std::move(table), stream());
             }
-        case MemoryType::HOST:
         case MemoryType::PINNED_HOST:
+            {
+                // benchmarks shows that using cudf::pack with pinned mr is sufficient.
+
+                auto packed_columns =
+                    cudf::pack(table_view(), stream(), br->pinned_mr_as_device());
+                br->release(reservation, packed_columns.gpu_data->size());
+
+                // packed table is now in rmm::device_buffer. We need to move it to a
+                // HostBuffer. We can't use TableChunk packed_columns constructor because
+                // it would misinterpret the packed pinned host memory as device memory
+                // and make it avaiable as a device table. This violates the
+                // `is_available()` contract.
+
+                auto host_buffer = br->move(std::move(packed_columns.gpu_data), stream());
+                return TableChunk(std::make_unique<PackedData>(
+                    std::move(packed_columns.metadata), std::move(host_buffer)
+                ));
+            }
+        case MemoryType::HOST:
             {
                 // Get the packed data either from `packed_columns_` or `table_view().
                 std::unique_ptr<PackedData> packed_data;

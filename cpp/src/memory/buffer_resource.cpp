@@ -7,10 +7,13 @@
 #include <stdexcept>
 #include <utility>
 
+#include <cuda/memory>
+
 #include <rapidsmpf/cuda_stream.hpp>
 #include <rapidsmpf/error.hpp>
 #include <rapidsmpf/memory/buffer_resource.hpp>
 #include <rapidsmpf/memory/host_buffer.hpp>
+#include <rapidsmpf/memory/memory_type.hpp>
 #include <rapidsmpf/utils/string.hpp>
 
 namespace rapidsmpf {
@@ -78,6 +81,10 @@ rmm::host_async_resource_ref BufferResource::pinned_mr() {
         pinned_mr_, "no pinned memory resource is available", std::invalid_argument
     );
     return *pinned_mr_;
+}
+
+rmm::device_async_resource_ref BufferResource::pinned_mr_as_device() {
+    return rmm::to_device_async_resource_ref_checked(pinned_mr_.get());
 }
 
 std::pair<MemoryReservation, std::size_t> BufferResource::reserve(
@@ -185,7 +192,18 @@ std::unique_ptr<Buffer> BufferResource::move(
         cuda_stream_join(stream, upstream);
         data->set_stream(stream);
     }
-    return std::unique_ptr<Buffer>(new Buffer(std::move(data), MemoryType::DEVICE));
+    // data() will be host accessible if data is in pinned host memory
+    if (cuda::is_host_accessible(data->data())) {
+        return std::unique_ptr<Buffer>(new Buffer(
+            std::make_unique<HostBuffer>(
+                HostBuffer::from_rmm_device_buffer(std::move(data), stream, pinned_mr())
+            ),
+            stream,
+            MemoryType::PINNED_HOST
+        ));
+    } else {  // if data is in device memory OR empty
+        return std::unique_ptr<Buffer>(new Buffer(std::move(data), MemoryType::DEVICE));
+    }
 }
 
 std::unique_ptr<Buffer> BufferResource::move(
@@ -221,7 +239,7 @@ std::unique_ptr<HostBuffer> BufferResource::move_to_host_buffer(
     std::unique_ptr<Buffer> buffer, MemoryReservation& reservation
 ) {
     RAPIDSMPF_EXPECTS(
-        reservation.mem_type_ == MemoryType::HOST,
+        is_host_accessible(reservation.mem_type_),
         "the memory type of MemoryReservation doesn't match",
         std::invalid_argument
     );
@@ -247,20 +265,25 @@ memory_available_from_options(RmmResourceAdaptor* mr, config::Options options) {
     return {
         {MemoryType::DEVICE,
          LimitAvailableMemory{
-             mr, options.get<std::int64_t>("spill_device_limit", [](auto const& s) {
-                 auto const [_, total_mem] = rmm::available_device_memory();
-                 return rmm::align_down(
-                     parse_nbytes_or_percent(s.empty() ? "80%" : s, total_mem),
-                     rmm::CUDA_ALLOCATION_ALIGNMENT
-                 );
-             })
+             mr,
+             options.get<std::int64_t>(
+                 "spill_device_limit",
+                 [](auto const& s) {
+                     auto const [_, total_mem] = rmm::available_device_memory();
+                     return rmm::align_down(
+                         parse_nbytes_or_percent(s.empty() ? "80%" : s, total_mem),
+                         rmm::CUDA_ALLOCATION_ALIGNMENT
+                     );
+                 }
+             )
          }}
     };
 }
 
 std::optional<Duration> periodic_spill_check_from_options(config::Options options) {
     return options.get<std::optional<Duration>>(
-        "periodic_spill_check", [](auto const& s) -> std::optional<Duration> {
+        "periodic_spill_check",
+        [](auto const& s) -> std::optional<Duration> {
             if (s.empty()) {
                 return parse_duration("1ms");
             }

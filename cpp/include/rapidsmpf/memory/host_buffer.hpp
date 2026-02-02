@@ -19,7 +19,6 @@
 
 #include <rapidsmpf/error.hpp>
 #include <rapidsmpf/memory/host_memory_resource.hpp>
-#include <rapidsmpf/memory/pinned_memory_resource.hpp>
 
 namespace rapidsmpf {
 
@@ -209,7 +208,7 @@ class HostBuffer {
     static HostBuffer from_rmm_device_buffer(
         std::unique_ptr<rmm::device_buffer> pinned_host_buffer,
         rmm::cuda_stream_view stream,
-        PinnedMemoryResource& mr
+        rmm::host_async_resource_ref mr
     );
 
   private:
