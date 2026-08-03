@@ -278,12 +278,13 @@ def _fmt_bytes(n: int) -> str:
 
 
 def _atexit_report() -> None:
+    """Print any leftover samples (e.g. if per-query clear was not used)."""
     if not is_enabled():
         return
     text = report()
     if "no samples" in text:
         return
-    print(f"\n{text}\n", flush=True)
+    print(f"\nReservation accuracy (leftover at exit):\n{text}\n", flush=True)
 
 
 atexit.register(_atexit_report)
