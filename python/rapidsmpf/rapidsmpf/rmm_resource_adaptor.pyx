@@ -96,3 +96,25 @@ cdef class RmmResourceAdaptor(DeviceMemoryResource):
         with nogil:
             ret = deref(mr).current_allocated()
         return ret
+
+    def begin_scoped_memory_record(self) -> None:
+        """Begin a thread-local scoped memory usage record.
+
+        Must be paired with :meth:`end_scoped_memory_record`.
+        """
+        cdef cpp_RmmResourceAdaptor* mr = self.get_handle()
+        with nogil:
+            deref(mr).begin_scoped_memory_record()
+
+    def end_scoped_memory_record(self):
+        """End the current thread-local scoped memory record.
+
+        Returns
+        -------
+        The scoped memory record that was just ended.
+        """
+        cdef cpp_RmmResourceAdaptor* mr = self.get_handle()
+        cdef cpp_ScopedMemoryRecord ret
+        with nogil:
+            ret = deref(mr).end_scoped_memory_record()
+        return ScopedMemoryRecord.from_handle(ret)

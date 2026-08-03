@@ -6,6 +6,8 @@ from libcpp.utility cimport move
 
 from contextlib import contextmanager
 
+from rapidsmpf.memory.reservation_accuracy import track_opaque_reservation
+
 
 cdef class MemoryReservation:
     """
@@ -99,7 +101,7 @@ cdef class MemoryReservation:
 
 
 @contextmanager
-def opaque_memory_usage(MemoryReservation reservation not None):
+def opaque_memory_usage(MemoryReservation reservation not None, *, label=None):
     """
     Associate untracked memory usage with an existing reservation.
 
@@ -113,10 +115,17 @@ def opaque_memory_usage(MemoryReservation reservation not None):
     releasing any remaining, unconsumed bytes back to the underlying memory
     resource.
 
+    When ``RAPIDSMPF_RESERVATION_ACCURACY=1``, allocation peaks observed while
+    the reservation is held are recorded for later comparison against the
+    reserved size. See :mod:`rapidsmpf.memory.reservation_accuracy`.
+
     Parameters
     ----------
     reservation
         Memory reservation that accounts for the untracked memory usage.
+    label
+        Optional label for reservation-accuracy samples. Ignored when accuracy
+        tracking is disabled.
 
     Yields
     ------
@@ -126,11 +135,12 @@ def opaque_memory_usage(MemoryReservation reservation not None):
     Examples
     --------
     Account for allocations outside RapidsMPF:
-    >>> with opaque_memory_usage(ctx, reservation):
+    >>> with opaque_memory_usage(reservation):
     ...     # library call that allocates memory unknown to RapidsMPF.
     ...     result = library_op(...)
     """
-    try:
-        yield reservation
-    finally:
-        reservation.clear()
+    with track_opaque_reservation(reservation, label=label):
+        try:
+            yield reservation
+        finally:
+            reservation.clear()

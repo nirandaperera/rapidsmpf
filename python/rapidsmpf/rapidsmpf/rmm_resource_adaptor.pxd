@@ -18,6 +18,8 @@ cdef extern from "<rapidsmpf/rmm_resource_adaptor.hpp>" nogil:
 
         cpp_ScopedMemoryRecord get_main_record() except +ex_handler
         uint64_t current_allocated() noexcept
+        void begin_scoped_memory_record() except +ex_handler
+        cpp_ScopedMemoryRecord end_scoped_memory_record() except +ex_handler
 
 
 # The make_device_async_resource_ref C++ template (declared in RMM's

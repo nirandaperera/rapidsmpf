@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Iterator
@@ -19,4 +19,6 @@ class MemoryReservation:
 @contextmanager
 def opaque_memory_usage(
     reservation: MemoryReservation,
+    *,
+    label: str | None = None,
 ) -> Iterator[MemoryReservation]: ...
