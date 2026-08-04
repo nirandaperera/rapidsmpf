@@ -516,6 +516,7 @@ void BM_PinnedPoolInit_InitialPoolSize(benchmark::State& state) {
     rapidsmpf::PinnedPoolProperties props{
         .initial_pool_size = initial_pool_size,
         .max_pool_size = max_pool_size,
+        .num_init_threads = 1, // use CCCL's own priming
     };
 
     for (auto _ : state) {
@@ -530,6 +531,7 @@ void BM_PinnedPoolInit_InitialPoolSize(benchmark::State& state) {
     state.counters["initial_pool_size_bytes"] = static_cast<double>(initial_pool_size);
     state.counters["max_pool_size_bytes"] = static_cast<double>(max_pool_size);
     state.counters["initial_pool_pct"] = static_cast<double>(pct);
+    state.counters["num_init_threads"] = static_cast<double>(props.num_init_threads);
 }
 
 void PinnedPoolInit_InitialPoolSize_Args(benchmark::Benchmark* b) {
@@ -543,6 +545,57 @@ void PinnedPoolInit_InitialPoolSize_Args(benchmark::Benchmark* b) {
 
 BENCHMARK(BM_PinnedPoolInit_InitialPoolSize)
     ->Apply(PinnedPoolInit_InitialPoolSize_Args)
+    ->UseRealTime()
+    ->Unit(benchmark::kMillisecond);
+
+// Pool initialization time as a function of `num_init_threads`, at a fixed
+// initial pool size (50% of per-GPU host memory). `num_init_threads` sweeps
+// over {1, 2, 4, 8, 16}; `1` reproduces the original single-stream priming.
+void BM_PinnedPoolInit_NumInitThreads(benchmark::State& state) {
+    if (!rapidsmpf::is_pinned_memory_resources_supported()) {
+        state.SkipWithMessage("pinned memory not supported on system");
+        return;
+    }
+
+    // Ensure CUDA device context is initialized.
+    RAPIDSMPF_CUDA_TRY(cudaFree(nullptr));
+
+    auto const num_init_threads = safe_cast<std::size_t>(state.range(0));
+    std::size_t const max_pool_size = rapidsmpf::get_host_memory_per_gpu();
+    std::size_t const initial_pool_size = max_pool_size / 2;
+
+    rapidsmpf::PinnedPoolProperties props{
+        .initial_pool_size = initial_pool_size,
+        .max_pool_size = max_pool_size,
+        .num_init_threads = num_init_threads,
+    };
+
+    for (auto _ : state) {
+        auto br = make_pinned_buffer_resource(props);
+        benchmark::DoNotOptimize(br);
+        state.PauseTiming();
+        br.reset();
+        state.ResumeTiming();
+    }
+
+    state.counters["initial_pool_size_bytes"] = static_cast<double>(initial_pool_size);
+    state.counters["max_pool_size_bytes"] = static_cast<double>(max_pool_size);
+    state.counters["num_init_threads"] = static_cast<double>(num_init_threads);
+}
+
+void PinnedPoolInit_NumInitThreads_Args(benchmark::Benchmark* b) {
+    if (smoke_test_mode()) {
+        b->Iterations(1);
+        b->Args({1});
+    } else {
+        for (auto n : {1, 2, 4, 8, 16}) {
+            b->Args({n});
+        }
+    }
+}
+
+BENCHMARK(BM_PinnedPoolInit_NumInitThreads)
+    ->Apply(PinnedPoolInit_NumInitThreads_Args)
     ->UseRealTime()
     ->Unit(benchmark::kMillisecond);
 

@@ -83,6 +83,10 @@ struct PinnedPoolProperties {
     /// @brief NUMA node from which pinned memory should be allocated. Defaults to
     /// the NUMA node of the calling thread.
     int numa_id = get_current_numa_node();
+
+    /// @brief Number of threads used to prime the pool up to `initial_pool_size`.
+    /// Must be >= 1. A value of `1` falls back to CCCL's own single-stream priming.
+    std::size_t num_init_threads = 8;
 };
 
 /**
@@ -104,6 +108,9 @@ inline constexpr std::optional<PinnedPoolProperties> PinnedMemoryDisabled{};
  * - "pinned_max_pool_size" (bytes, percentage, or disabled): maximum pool size.
  *   - Byte and percentages uses the same parsing rules as "pinned_initial_pool_size".
  *   - A disabled value (e.g. "off") leaves the pool unbounded.
+ * - "pinned_memory_num_init_thread" (positive integer): number of threads used
+ *   to prime the pool up to `pinned_initial_pool_size`. See
+ *   `PinnedPoolProperties::num_init_threads`.
  *
  * @param options Configuration options.
  * @return The parsed `PinnedPoolProperties` when "pinned_memory" is enabled,

@@ -377,4 +377,36 @@ TEST(PinnedResource, from_default_options) {
             static_cast<double>(rapidsmpf::get_host_memory_per_gpu())
         )
     );
+    EXPECT_EQ(
+        props->num_init_threads,
+        rapidsmpf::parse_string<std::size_t>(
+            rapidsmpf::config::DEFAULTS.at("pinned_memory_num_init_thread")
+        )
+    );
+}
+
+TEST(PinnedResource, num_init_thread_option) {
+    {
+        // Explicit override honored.
+        std::unordered_map<std::string, std::string> strings = {
+            {"pinned_memory", "True"}, {"pinned_memory_num_init_thread", "3"}
+        };
+        auto props = rapidsmpf::pinned_pool_properties_from_options(
+            rapidsmpf::config::Options(strings)
+        );
+        ASSERT_TRUE(props.has_value());
+        EXPECT_EQ(props->num_init_threads, 3u);
+    }
+    {
+        // Non-positive value is rejected.
+        std::unordered_map<std::string, std::string> strings = {
+            {"pinned_memory", "True"}, {"pinned_memory_num_init_thread", "0"}
+        };
+        EXPECT_THROW(
+            rapidsmpf::pinned_pool_properties_from_options(
+                rapidsmpf::config::Options(strings)
+            ),
+            std::invalid_argument
+        );
+    }
 }

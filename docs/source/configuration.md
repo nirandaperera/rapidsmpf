@@ -116,6 +116,17 @@ rapidsmpf::config::Options options{rapidsmpf::config::get_environment_variables(
     available in the current NUMA node divided by the number of GPUs in that NUMA node.
     Accepts byte counts or percentage (e.g. `"4GiB"`, `"2048MiB"`).
 
+- **`pinned_memory_num_init_thread`**
+  - **Environment Variable**: `RAPIDSMPF_PINNED_MEMORY_NUM_INIT_THREAD`
+  - **Default**: `8`
+  - **Description**: Number of threads used to prime the pinned host memory pool up to
+    `pinned_initial_pool_size`. CCCL's `cuda::pinned_memory_pool` normally primes its
+    initial size with a single `cudaMallocFromPoolAsync` on one internal stream, which
+    serializes the (slow) pinned-host page registration of the entire pool. RapidsMPF
+    instead warms the pool with this many concurrent `allocate`/`deallocate` chunks,
+    each on its own non-blocking CUDA stream, so large pools initialize much faster.
+    Must be a positive integer; `1` falls back to CCCL's own single-stream priming.
+
 - **`spill_device_limit`**
   - **Environment Variable**: `RAPIDSMPF_SPILL_DEVICE_LIMIT`
   - **Default**: `80%`

@@ -29,6 +29,7 @@ inline const std::unordered_map<std::string, std::string> DEFAULTS{
     {"pinned_memory", "false"},
     {"pinned_initial_pool_size", "0%"},
     {"pinned_max_pool_size", "80%"},
+    {"pinned_memory_num_init_thread", "8"},
     {"spill_device_limit", "80%"},
     {"periodic_spill_check", "1ms"},
     {"num_streams", "16"},
