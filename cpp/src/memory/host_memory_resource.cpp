@@ -5,11 +5,17 @@
 
 
 #include <memory>
+#include <new>
 
 #include <sys/mman.h>
 #include <unistd.h>
 
 #include <rapidsmpf/memory/host_memory_resource.hpp>
+#include <rapidsmpf/system_info.hpp>
+
+#if RAPIDSMPF_HAVE_NUMA
+#include <numa.h>
+#endif
 
 namespace rapidsmpf {
 namespace {
@@ -43,15 +49,32 @@ void enable_hugepage_for_region(void* ptr, std::size_t size) {
 void* HostMemoryResource::allocate(
     rmm::cuda_stream_view, std::size_t size, std::size_t alignment
 ) {
-    void* ret = ::operator new(size, std::align_val_t{alignment});
+    void* ret = nullptr;
+#if RAPIDSMPF_HAVE_NUMA
+    if (numa_available() != -1) {
+        ret = numa_alloc_onnode(size, get_current_numa_node());
+        if (ret == nullptr) {
+            throw std::bad_alloc{};
+        }
+    } else
+#endif
+    {
+        ret = ::operator new(size, std::align_val_t{alignment});
+    }
     enable_hugepage_for_region(ret, size);
     return ret;
 }
 
 void HostMemoryResource::deallocate(
-    rmm::cuda_stream_view stream, void* ptr, std::size_t, std::size_t alignment
+    rmm::cuda_stream_view stream, void* ptr, std::size_t size, std::size_t alignment
 ) noexcept {
     stream.synchronize();
+#if RAPIDSMPF_HAVE_NUMA
+    if (ptr != nullptr && numa_available() != -1) {
+        numa_free(ptr, size);
+        return;
+    }
+#endif
     ::operator delete(ptr, std::align_val_t{alignment});
 }
 }  // namespace rapidsmpf

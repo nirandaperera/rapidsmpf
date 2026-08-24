@@ -22,9 +22,12 @@ class BufferResource;
 /**
  * @brief Host memory resource using standard CPU allocation.
  *
- * This resource allocates pageable host memory using the ``new`` and ``delete``
- * operators. It is intended for use with `cuda::mr::resource` and related
- * facilities, and advertises the `cuda::mr::host_accessible` property.
+ * This resource allocates pageable host memory. When built with NUMA support
+ * (`RAPIDSMPF_HAVE_NUMA`) and NUMA is available at runtime, allocations use
+ * `numa_alloc_onnode` on the calling thread's NUMA node and are released with
+ * `numa_free`. Otherwise it uses the ``new`` and ``delete`` operators. It is
+ * intended for use with `cuda::mr::resource` and related facilities, and
+ * advertises the `cuda::mr::host_accessible` property.
  *
  * For sufficiently large allocations (>4 MiB), this resource also issues a
  * best-effort request to enable Transparent Huge Pages (THP) on the allocated
@@ -95,8 +98,8 @@ class HostMemoryResource : public BackRefMixin<BufferResource> {
     /**
      * @brief Deallocates host memory associated with a CUDA stream.
      *
-     * Synchronizes @p stream before deallocating the memory with the ``delete``
-     * operator.
+     * Synchronizes @p stream before deallocating the memory. Uses ``numa_free``
+     * when NUMA allocation was used, otherwise the ``delete`` operator.
      *
      * @param stream CUDA stream associated with operations that used @p ptr.
      * @param ptr Pointer to the memory to deallocate. May be nullptr.
