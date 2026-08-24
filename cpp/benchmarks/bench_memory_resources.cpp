@@ -5,7 +5,6 @@
 
 #include <cstdlib>
 #include <cstring>
-#include <new>
 #include <optional>
 
 #include <benchmark/benchmark.h>
@@ -21,12 +20,7 @@
 #include <rapidsmpf/memory/cuda_memcpy_async.hpp>
 #include <rapidsmpf/memory/host_memory_resource.hpp>
 #include <rapidsmpf/memory/pinned_memory_resource.hpp>
-#include <rapidsmpf/system_info.hpp>
 #include <rapidsmpf/utils/string.hpp>
-
-#if RAPIDSMPF_HAVE_NUMA
-#include <numa.h>
-#endif
 
 using rapidsmpf::safe_cast;
 
@@ -52,23 +46,8 @@ enum ResourceType : int {
     NEW_DELETE = 0,
     HOST_MEMORY_RESOURCE = 1,
     PINNED_MEMORY_RESOURCE = 2,
-#if RAPIDSMPF_HAVE_NUMA
-    NUMA_NEW_DELETE = 3,
-#endif
 };
 
-#if RAPIDSMPF_HAVE_NUMA
-constexpr std::array<ResourceType, 4> RESOURCE_TYPES{
-    ResourceType::NEW_DELETE,
-    ResourceType::HOST_MEMORY_RESOURCE,
-    ResourceType::PINNED_MEMORY_RESOURCE,
-    ResourceType::NUMA_NEW_DELETE
-};
-
-std::array<std::string, 4> const ResourceTypeStr{
-    "NewDelete", "HostMemoryResource", "PinnedMemoryResource", "NumaNewDelete"
-};
-#else
 constexpr std::array<ResourceType, 3> RESOURCE_TYPES{
     ResourceType::NEW_DELETE,
     ResourceType::HOST_MEMORY_RESOURCE,
@@ -78,7 +57,6 @@ constexpr std::array<ResourceType, 3> RESOURCE_TYPES{
 std::array<std::string, 3> const ResourceTypeStr{
     "NewDelete", "HostMemoryResource", "PinnedMemoryResource"
 };
-#endif
 
 class NewDelete {
   public:
@@ -115,52 +93,12 @@ class NewDelete {
         return true;
     }
 
+    bool operator!=(NewDelete const&) const noexcept {
+        return false;
+    }
+
     friend void get_property(NewDelete const&, cuda::mr::host_accessible) noexcept {}
 };
-
-#if RAPIDSMPF_HAVE_NUMA
-class NumaNewDelete {
-  public:
-    void* allocate_sync(std::size_t size, std::size_t = rmm::CUDA_ALLOCATION_ALIGNMENT) {
-        void* ptr = numa_alloc_onnode(size, rapidsmpf::get_current_numa_node());
-        if (ptr == nullptr) {
-            throw std::bad_alloc{};
-        }
-        return ptr;
-    }
-
-    void deallocate_sync(
-        void* ptr, std::size_t size, std::size_t = rmm::CUDA_ALLOCATION_ALIGNMENT
-    ) noexcept {
-        if (ptr != nullptr) {
-            numa_free(ptr, size);
-        }
-    }
-
-    void* allocate(
-        rmm::cuda_stream_view,
-        std::size_t size,
-        std::size_t alignment = rmm::CUDA_ALLOCATION_ALIGNMENT
-    ) {
-        return allocate_sync(size, alignment);
-    }
-
-    void deallocate(
-        rmm::cuda_stream_view,
-        void* ptr,
-        std::size_t size,
-        std::size_t alignment = rmm::CUDA_ALLOCATION_ALIGNMENT
-    ) noexcept {
-        deallocate_sync(ptr, size, alignment);
-    }
-
-    bool operator==(NumaNewDelete const&) const noexcept {
-        return true;
-    }
-
-    friend void get_property(NumaNewDelete const&, cuda::mr::host_accessible) noexcept {}
-};
-#endif
 
 // Build a buffer resource with the given (optional) pinned pool properties.
 std::shared_ptr<rapidsmpf::BufferResource> make_pinned_buffer_resource(
@@ -182,10 +120,6 @@ cuda::mr::any_resource<cuda::mr::host_accessible> create_host_memory_resource(
     switch (resource_type) {
     case ResourceType::NEW_DELETE:
         return NewDelete{};
-#if RAPIDSMPF_HAVE_NUMA
-    case ResourceType::NUMA_NEW_DELETE:
-        return NumaNewDelete{};
-#endif
     case ResourceType::HOST_MEMORY_RESOURCE:
         {
             auto br = make_pinned_buffer_resource(rapidsmpf::PinnedMemoryDisabled);
@@ -207,30 +141,15 @@ cuda::mr::any_resource<cuda::mr::host_accessible> create_host_memory_resource(
     }
 }
 
-bool skip_if_unsupported_resource(
-    benchmark::State& state, ResourceType const resource_type
-) {
-    if (resource_type == ResourceType::PINNED_MEMORY_RESOURCE
-        && !rapidsmpf::is_pinned_memory_resources_supported())
-    {
-        state.SkipWithMessage("pinned memory not supported on system");
-        return true;
-    }
-#if RAPIDSMPF_HAVE_NUMA
-    if (resource_type == ResourceType::NUMA_NEW_DELETE && numa_available() == -1) {
-        state.SkipWithMessage("NUMA not available on system");
-        return true;
-    }
-#endif
-    return false;
-}
-
 void BM_Allocate(benchmark::State& state) {
     rmm::cuda_stream_view stream = rmm::cuda_stream_default;
     auto const allocation_size = static_cast<std::size_t>(state.range(0));
     auto const resource_type = static_cast<ResourceType>(state.range(1));
 
-    if (skip_if_unsupported_resource(state, resource_type)) {
+    if (resource_type == ResourceType::PINNED_MEMORY_RESOURCE
+        && !rapidsmpf::is_pinned_memory_resources_supported())
+    {
+        state.SkipWithMessage("pinned memory not supported on system");
         return;
     }
 
@@ -260,7 +179,10 @@ void BM_Deallocate(benchmark::State& state) {
     auto const allocation_size = safe_cast<std::size_t>(state.range(0));
     auto const resource_type = static_cast<ResourceType>(state.range(1));
 
-    if (skip_if_unsupported_resource(state, resource_type)) {
+    if (resource_type == ResourceType::PINNED_MEMORY_RESOURCE
+        && !rapidsmpf::is_pinned_memory_resources_supported())
+    {
+        state.SkipWithMessage("pinned memory not supported on system");
         return;
     }
 
@@ -289,7 +211,10 @@ void BM_DeviceToHostCopyInclAlloc(benchmark::State& state) {
     auto const transfer_size = static_cast<std::size_t>(state.range(0));
     auto const resource_type = static_cast<ResourceType>(state.range(1));
 
-    if (skip_if_unsupported_resource(state, resource_type)) {
+    if (resource_type == ResourceType::PINNED_MEMORY_RESOURCE
+        && !rapidsmpf::is_pinned_memory_resources_supported())
+    {
+        state.SkipWithMessage("pinned memory not supported on system");
         return;
     }
 
@@ -353,7 +278,10 @@ void BM_DeviceToHostCopy(benchmark::State& state) {
     auto const transfer_size = static_cast<std::size_t>(state.range(0));
     auto const resource_type = static_cast<ResourceType>(state.range(1));
 
-    if (skip_if_unsupported_resource(state, resource_type)) {
+    if (resource_type == ResourceType::PINNED_MEMORY_RESOURCE
+        && !rapidsmpf::is_pinned_memory_resources_supported())
+    {
+        state.SkipWithMessage("pinned memory not supported on system");
         return;
     }
 
@@ -381,7 +309,10 @@ void BM_HostToDeviceCopy(benchmark::State& state) {
     auto const transfer_size = static_cast<std::size_t>(state.range(0));
     auto const resource_type = static_cast<ResourceType>(state.range(1));
 
-    if (skip_if_unsupported_resource(state, resource_type)) {
+    if (resource_type == ResourceType::PINNED_MEMORY_RESOURCE
+        && !rapidsmpf::is_pinned_memory_resources_supported())
+    {
+        state.SkipWithMessage("pinned memory not supported on system");
         return;
     }
 
@@ -413,7 +344,10 @@ void BM_HostToHostCopy(benchmark::State& state) {
     auto const transfer_size = static_cast<std::size_t>(state.range(0));
     auto const resource_type = static_cast<ResourceType>(state.range(1));
 
-    if (skip_if_unsupported_resource(state, resource_type)) {
+    if (resource_type == ResourceType::PINNED_MEMORY_RESOURCE
+        && !rapidsmpf::is_pinned_memory_resources_supported())
+    {
+        state.SkipWithMessage("pinned memory not supported on system");
         return;
     }
 

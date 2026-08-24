@@ -51,13 +51,8 @@ target_compile_options(
 )
 target_link_libraries(
   bench_memory_resources
-  PRIVATE rapidsmpf::rapidsmpf
-          rmm::rmm
-          benchmark::benchmark
-          benchmark::benchmark_main
-          $<$<BOOL:${RAPIDSMPF_HAVE_NUMA}>:numa>
-          $<TARGET_NAME_IF_EXISTS:conda_env>
-          maybe_asan
+  PRIVATE rapidsmpf::rapidsmpf rmm::rmm benchmark::benchmark benchmark::benchmark_main
+          $<TARGET_NAME_IF_EXISTS:conda_env> maybe_asan
 )
 install(
   TARGETS bench_memory_resources
