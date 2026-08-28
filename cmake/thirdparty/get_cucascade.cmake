@@ -5,13 +5,23 @@
 # cmake-format: on
 # =============================================================================
 
-# This function finds cuCascade and ensures cuDF transitive dependencies are available for linking.
-#
-# We build cuCascade as a static library to avoid packaging issues with wheels.
+# Production builds only need topology discovery. Benchmark builds also use the cudf-free core
+# library for the pinned-memory disk pipeline.
 function(find_and_configure_cucascade)
+  if(RAPIDSMPF_BUILD_BENCHMARKS)
+    set(CPM_DOWNLOAD_cuCascade ON)
+    set(cucascade_topology_only OFF)
+    set(cucascade_global_targets cuCascade::cucascade_topology_discovery
+                                 cuCascade::cucascade_static
+    )
+  else()
+    set(cucascade_topology_only ON)
+    set(cucascade_global_targets cuCascade::cucascade_topology_discovery)
+  endif()
+
   rapids_cpm_find(
     cuCascade 0.1.0
-    GLOBAL_TARGETS cuCascade::cucascade_topology_discovery
+    GLOBAL_TARGETS ${cucascade_global_targets}
     CPM_ARGS
     GIT_REPOSITORY https://github.com/NVIDIA/cuCascade.git
     GIT_TAG d515bb0536b8766bae61ec60a530df394467af64
@@ -20,7 +30,9 @@ function(find_and_configure_cucascade)
             "CUCASCADE_BUILD_SHARED_LIBS OFF"
             "CUCASCADE_BUILD_STATIC_LIBS ON"
             "CUCASCADE_WARNINGS_AS_ERRORS OFF"
-            "CUCASCADE_TOPOLOGY_ONLY ON"
+            "CUCASCADE_TOPOLOGY_ONLY ${cucascade_topology_only}"
+            "CUCASCADE_BUILD_CUDF OFF"
+            "CUCASCADE_BUILD_IO OFF"
     EXCLUDE_FROM_ALL ON
   )
 endfunction()

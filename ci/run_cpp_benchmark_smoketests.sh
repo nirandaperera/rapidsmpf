@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 set -xeuo pipefail
@@ -20,6 +20,12 @@ python "${TIMEOUT_TOOL_PATH}" 30 \
 
 RAPIDSMPF_SMOKE_TEST_MODE="ON" \
     python "${TIMEOUT_TOOL_PATH}" 30 ./bench_memory_resources
+
+SPILL_DIR="$(mktemp -d)"
+trap 'rm -rf "${SPILL_DIR}"' EXIT
+RAPIDSMPF_SMOKE_TEST_MODE="ON" \
+RAPIDSMPF_DISK_SPILL_DIR="${SPILL_DIR}" \
+    python "${TIMEOUT_TOOL_PATH}" 60 ./bench_disk_spill
 
 # Ensure that comm benchmark with CUPTI monitor is runnable and creates the expected csv files
 python "${TIMEOUT_TOOL_PATH}" 30 \
