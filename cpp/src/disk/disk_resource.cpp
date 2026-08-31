@@ -3,8 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include <rapidsmpf/disk/disk_resource.hpp>
-
 #include <cerrno>
 #include <cstring>
 #include <stdexcept>
@@ -17,32 +15,10 @@
 #include <kvikio/file_handle.hpp>
 
 #include <rapidsmpf/config.hpp>
+#include <rapidsmpf/disk/disk_resource.hpp>
 #include <rapidsmpf/error.hpp>
 
 namespace rapidsmpf::disk {
-
-namespace {
-
-void synchronize_file(std::filesystem::path const& path) {
-    auto const fd = ::open(path.c_str(), O_RDONLY);
-    RAPIDSMPF_EXPECTS(
-        fd >= 0,
-        "open for fdatasync failed: " + std::string{std::strerror(errno)},
-        std::runtime_error
-    );
-    if (::fdatasync(fd) != 0) {
-        auto const error = std::string{std::strerror(errno)};
-        ::close(fd);
-        RAPIDSMPF_FAIL("fdatasync failed: " + error, std::runtime_error);
-    }
-    RAPIDSMPF_EXPECTS(
-        ::close(fd) == 0,
-        "close after fdatasync failed: " + std::string{std::strerror(errno)},
-        std::runtime_error
-    );
-}
-
-}  // namespace
 
 void DiskResource::write(
     std::filesystem::path const& path,
@@ -81,7 +57,22 @@ void DiskResource::read(
 }
 
 void DiskResource::flush(std::filesystem::path const& path) {
-    synchronize_file(path);
+    auto const fd = ::open(path.c_str(), O_RDONLY);
+    RAPIDSMPF_EXPECTS(
+        fd >= 0,
+        "open for fdatasync failed: " + std::string{std::strerror(errno)},
+        std::runtime_error
+    );
+    if (::fdatasync(fd) != 0) {
+        auto const error = std::string{std::strerror(errno)};
+        ::close(fd);
+        RAPIDSMPF_FAIL("fdatasync failed: " + error, std::runtime_error);
+    }
+    RAPIDSMPF_EXPECTS(
+        ::close(fd) == 0,
+        "close after fdatasync failed: " + std::string{std::strerror(errno)},
+        std::runtime_error
+    );
 }
 
 std::filesystem::path default_spill_directory(config::Options options) {

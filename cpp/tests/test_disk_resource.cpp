@@ -11,10 +11,10 @@
 #include <memory>
 #include <string>
 #include <string_view>
-#include <unistd.h>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <cuda/stream>
 
@@ -149,6 +149,9 @@ void check_file_contents(
 class DiskResourceTest : public ::testing::TestWithParam<MemoryType> {
   protected:
     void SetUp() override {
+        if (GlobalEnvironment->type() != TestEnvironmentType::SINGLE) {
+            GTEST_SKIP() << "Disk I/O tests run only in the single-process environment";
+        }
         if (GetParam() == MemoryType::PINNED_HOST
             && !is_pinned_memory_resources_supported())
         {
@@ -177,9 +180,7 @@ INSTANTIATE_TEST_SUITE_P(
     MemoryTypes,
     DiskResourceTest,
     ::testing::ValuesIn(MEMORY_TYPES),
-    [](::testing::TestParamInfo<MemoryType> const& info) {
-        return to_string(info.param);
-    }
+    [](::testing::TestParamInfo<MemoryType> const& info) { return to_string(info.param); }
 );
 
 TEST_P(DiskResourceTest, RoundTrip) {
@@ -234,14 +235,16 @@ TEST_P(DiskResourceTest, FlushDoesNotThrow) {
 
 TEST(DiskSpillDirectory, EmptyOptionUsesTempDir) {
     config::Options options;
-    EXPECT_EQ(
-        default_spill_directory(options), std::filesystem::temp_directory_path()
-    );
+    EXPECT_EQ(default_spill_directory(options), std::filesystem::temp_directory_path());
 }
 
 TEST(DiskSpillDirectory, UsesConfiguredPath) {
-    config::Options options{{"disk_spill_dir", "/tmp/rapidsmpf-spill"}};
-    EXPECT_EQ(default_spill_directory(options), std::filesystem::path{"/tmp/rapidsmpf-spill"});
+    config::Options options{
+        {{"disk_spill_dir", config::OptionValue("/tmp/rapidsmpf-spill")}}
+    };
+    EXPECT_EQ(
+        default_spill_directory(options), std::filesystem::path{"/tmp/rapidsmpf-spill"}
+    );
 }
 
 }  // namespace
