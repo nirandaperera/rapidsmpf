@@ -35,6 +35,26 @@ install(
 include(${rapids-cmake-dir}/cpm/gbench.cmake)
 rapids_cpm_gbench(BUILD_STATIC)
 
+add_executable(bench_disk_spill "bench_disk_spill.cpp")
+set_target_properties(
+  bench_disk_spill
+  PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${RAPIDSMPF_BINARY_DIR}/benchmarks"
+             CXX_STANDARD 20
+             CXX_STANDARD_REQUIRED ON
+             CXX_EXTENSIONS ON
+)
+target_compile_options(bench_disk_spill PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${RAPIDSMPF_CXX_FLAGS}>")
+target_link_libraries(
+  bench_disk_spill PRIVATE rapidsmpf::rapidsmpf cuCascade::cucascade_static benchmark::benchmark
+                           $<TARGET_NAME_IF_EXISTS:conda_env> maybe_asan
+)
+install(
+  TARGETS bench_disk_spill
+  COMPONENT benchmarking
+  DESTINATION bin/benchmarks/librapidsmpf
+  EXCLUDE_FROM_ALL
+)
+
 add_executable(bench_memory_resources "bench_memory_resources.cpp")
 set_target_properties(
   bench_memory_resources
