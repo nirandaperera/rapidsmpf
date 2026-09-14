@@ -383,6 +383,8 @@ class BufferResource : public std::enable_shared_from_this<BufferResource> {
      *
      * @throws std::invalid_argument if the memory type is `MemoryType::PINNED_HOST` and
      * the pinned memory resource is not available.
+     * @throws std::invalid_argument if the memory type is `MemoryType::DISK` and
+     * no disk resource is available.
      */
     std::pair<MemoryReservation, std::size_t> reserve(
         MemoryType mem_type, std::size_t size, AllowOverbooking allow_overbooking
@@ -427,6 +429,9 @@ class BufferResource : public std::enable_shared_from_this<BufferResource> {
     [[nodiscard]] MemoryReservation reserve_or_fail(std::size_t size, Range mem_types) {
         // try to reserve memory from the given order
         for (auto const& mem_type : mem_types) {
+            if (mem_type == MemoryType::DISK && disk_resource_ == nullptr) {
+                continue;
+            }
             if (mem_type == MemoryType::PINNED_HOST && !pinned_mr_.has_value()) {
                 // Pinned host memory is only available if the memory resource is
                 // available.

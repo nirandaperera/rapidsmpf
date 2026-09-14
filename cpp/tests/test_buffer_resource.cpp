@@ -4,10 +4,15 @@
  */
 
 
+#include <cstdint>
+#include <filesystem>
+#include <limits>
 #include <span>
 #include <sstream>
+#include <vector>
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <cuda/stream>
 
@@ -559,8 +564,7 @@ INSTANTIATE_TEST_SUITE_P(
     ),
     [](const ::testing::TestParamInfo<SliceCopyTestParams>& info) {
         std::stringstream ss;
-        ss << (std::get<0>(info.param) == MemoryType::HOST ? "Host" : "Device") << "To"
-           << (std::get<1>(info.param) == MemoryType::HOST ? "Host" : "Device") << "_"
+        ss << std::get<0>(info.param) << "To" << std::get<1>(info.param) << "_"
            << "off_" << std::get<2>(info.param).offset << "_"
            << "len_" << std::get<2>(info.param).length;
         return ss.str();
@@ -650,8 +654,7 @@ INSTANTIATE_TEST_SUITE_P(
         auto dest_type = std::get<1>(info.param);
         auto params = std::get<2>(info.param);
         std::stringstream ss;
-        ss << (source_type == MemoryType::HOST ? "Host" : "Device") << "To"
-           << (dest_type == MemoryType::HOST ? "Host" : "Device") << "_"
+        ss << source_type << "To" << dest_type << "_"
            << "src_" << params.source_size << "_"
            << "dst_off_" << params.dest_offset;
         return ss.str();
@@ -722,7 +725,7 @@ TEST_F(BufferResourceDifferentResourcesTest, CopySlice) {
     auto buf1 = create_source_buffer();
 
     // Reserve memory for the slice on br2
-    auto res2 = br2->reserve_or_fail(slice_length, MEMORY_TYPES);
+    auto res2 = br2->reserve_or_fail(slice_length, ADDRESSABLE_MEMORY_TYPES);
 
     // Create slice of buf1 on br2
     auto buf2 = br2->make_buffer(slice_length, stream, res2);
@@ -747,7 +750,9 @@ TEST_F(BufferResourceDifferentResourcesTest, Copy) {
     auto buf1 = create_source_buffer();
 
     // Create copy of buf1 on br2
-    auto buf2 = br2->make_buffer(stream, br2->reserve_or_fail(buffer_size, MEMORY_TYPES));
+    auto buf2 = br2->make_buffer(
+        stream, br2->reserve_or_fail(buffer_size, ADDRESSABLE_MEMORY_TYPES)
+    );
     buffer_copy(br2->statistics(), *buf2, *buf1, buffer_size);
     EXPECT_EQ(buf2->size, buffer_size);
     buf2->stream().sync();
@@ -921,6 +926,98 @@ TEST(RmmResourceAdaptor, EqualityAcrossCopiesAndAccessPaths) {
 
 // Guarantee that when stats enabled, br->device_mr() reference gets properly casted to an
 // RmmResourceAdaptor and used by the memory recorder.
+namespace {
+
+std::filesystem::path disk_test_dir() {
+    auto const base = std::filesystem::temp_directory_path()
+                      / ("rapidsmpf-br-disk-" + std::to_string(::getpid()));
+    std::error_code ec;
+    std::filesystem::create_directories(base, ec);
+    return base;
+}
+
+std::shared_ptr<BufferResource> make_br_with_disk() {
+    return BufferResource::create(
+        rmm::mr::get_current_device_resource_ref(),
+        PinnedMemoryDisabled,
+        {},
+        std::nullopt,
+        std::make_shared<StreamPool>(4),
+        Statistics::disabled(),
+        disk_test_dir()
+    );
+}
+
+std::vector<std::uint8_t> fill_pattern(Buffer& buffer, std::size_t size) {
+    std::vector<std::uint8_t> pattern(size);
+    for (std::size_t i = 0; i < size; ++i) {
+        pattern[i] = static_cast<std::uint8_t>((i * 17U) & 0xffU);
+    }
+    buffer.write_access([&](std::byte* ptr, cuda::stream_ref stream) {
+        RAPIDSMPF_CUDA_TRY(cuda_memcpy_async(ptr, pattern.data(), size, stream));
+    });
+    buffer.stream().sync();
+    return pattern;
+}
+
+}  // namespace
+
+TEST(BufferResourceDisk, ReserveDiskWithoutResourceThrows) {
+    auto br = BufferResource::create(rmm::mr::get_current_device_resource_ref());
+    EXPECT_THROW(
+        br->reserve(MemoryType::DISK, 1024, AllowOverbooking::NO), std::invalid_argument
+    );
+}
+
+TEST(BufferResourceDisk, ReserveDiskIsUnlimited) {
+    auto br = make_br_with_disk();
+    EXPECT_EQ(
+        br->memory_available(MemoryType::DISK), std::numeric_limits<std::int64_t>::max()
+    );
+
+    auto [reservation, overbooking] =
+        br->reserve(MemoryType::DISK, 1024, AllowOverbooking::NO);
+    EXPECT_EQ(reservation.mem_type(), MemoryType::DISK);
+    EXPECT_EQ(reservation.size(), 1024U);
+    EXPECT_EQ(overbooking, 0U);
+
+    auto buffer = br->make_buffer(1024, cuda::stream_ref{cudaStreamLegacy}, reservation);
+    EXPECT_EQ(buffer->mem_type(), MemoryType::DISK);
+    EXPECT_EQ(buffer->size, 1024U);
+    EXPECT_EQ(reservation.size(), 0U);
+}
+
+TEST(BufferResourceDisk, MoveThroughDiskReservation) {
+    auto br = make_br_with_disk();
+    auto stream = cuda::stream_ref{cudaStreamLegacy};
+    auto host_buf = br->make_buffer(stream, br->reserve_or_fail(256, MemoryType::HOST));
+    auto const expected = fill_pattern(*host_buf, 256);
+
+    auto disk_reservation = br->reserve_or_fail(256, MemoryType::DISK);
+    auto disk_buf = br->move(std::move(host_buf), disk_reservation);
+    EXPECT_EQ(disk_buf->mem_type(), MemoryType::DISK);
+    EXPECT_EQ(disk_buf->size, 256U);
+    EXPECT_EQ(disk_reservation.size(), 0U);
+    EXPECT_THROW(std::ignore = disk_buf->data(), std::logic_error);
+
+    auto reservation = br->reserve_or_fail(256, MemoryType::HOST);
+    auto restored = br->move(std::move(disk_buf), reservation);
+    EXPECT_EQ(restored->mem_type(), MemoryType::HOST);
+    EXPECT_EQ(
+        restored->get_storage<Buffer::HostBufferT>()->copy_to_uint8_vector(), expected
+    );
+}
+
+TEST(BufferResourceDisk, BufferCopyRejectsDiskToDisk) {
+    auto br = make_br_with_disk();
+    auto stream = cuda::stream_ref{cudaStreamLegacy};
+    auto disk_a = br->make_buffer(stream, br->reserve_or_fail(64, MemoryType::DISK));
+    auto disk_b = br->make_buffer(stream, br->reserve_or_fail(64, MemoryType::DISK));
+    EXPECT_THROW(
+        buffer_copy(br->statistics(), *disk_a, *disk_b, 64), std::invalid_argument
+    );
+}
+
 TEST(BufferResource, DeviceMrIsAddressableByMemoryRecorder) {
     constexpr std::size_t kAllocBytes = 1_MiB;
 

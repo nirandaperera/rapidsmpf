@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -92,33 +93,6 @@ struct ExclusiveBufferAccess {
     ExclusiveBufferAccess(ExclusiveBufferAccess&&) = delete;
     ExclusiveBufferAccess& operator=(ExclusiveBufferAccess&&) = delete;
 
-    void write(
-        DiskResource& disk,
-        std::filesystem::path const& path,
-        std::size_t size,
-        std::size_t ptr_offset = 0,
-        std::size_t file_offset = 0
-    ) {
-        EXPECT_EQ(
-            disk.write(path, ptr_ + ptr_offset, size, buffer_.mem_type(), file_offset),
-            size
-        );
-    }
-
-    void read(
-        DiskResource& disk,
-        std::filesystem::path const& path,
-        std::size_t size,
-        std::size_t ptr_offset = 0,
-        std::size_t file_offset = 0
-    ) {
-        EXPECT_EQ(
-            disk.read(path, ptr_ + ptr_offset, size, buffer_.mem_type(), file_offset),
-            size
-        );
-    }
-
-  private:
     Buffer& buffer_;
     std::byte* ptr_{nullptr};
 };
@@ -183,6 +157,10 @@ class DiskResourceTest : public ::testing::TestWithParam<MemoryType> {
         return br_->make_buffer(stream_, br_->reserve_or_fail(size, GetParam()));
     }
 
+    std::unique_ptr<Buffer> make_disk_backed_buffer(std::size_t size) {
+        return br_->make_buffer(stream_, br_->reserve_or_fail(size, MemoryType::DISK));
+    }
+
     std::shared_ptr<DiskResource> disk_;
     std::shared_ptr<BufferResource> br_;
     cuda::stream_ref stream_{cudaStreamLegacy};
@@ -191,7 +169,7 @@ class DiskResourceTest : public ::testing::TestWithParam<MemoryType> {
 INSTANTIATE_TEST_SUITE_P(
     MemoryTypes,
     DiskResourceTest,
-    ::testing::ValuesIn(MEMORY_TYPES),
+    ::testing::ValuesIn(ADDRESSABLE_MEMORY_TYPES),
     [](::testing::TestParamInfo<MemoryType> const& info) { return to_string(info.param); }
 );
 
@@ -201,10 +179,23 @@ TEST_P(DiskResourceTest, RoundTrip) {
     auto source = make_buffer(pattern.size());
     fill_buffer(*source, pattern, 0);
 
-    ExclusiveBufferAccess{*source}.write(*disk_, path, pattern.size());
+    EXPECT_EQ(
+        disk_->write(
+            path, ExclusiveBufferAccess{*source}.ptr_, pattern.size(), source->mem_type()
+        ),
+        pattern.size()
+    );
 
     auto destination = make_buffer(pattern.size());
-    ExclusiveBufferAccess{*destination}.read(*disk_, path, pattern.size());
+    EXPECT_EQ(
+        disk_->read(
+            path,
+            ExclusiveBufferAccess{*destination}.ptr_,
+            pattern.size(),
+            destination->mem_type()
+        ),
+        pattern.size()
+    );
 
     EXPECT_EQ(copy_from_buffer(*destination, pattern.size(), 0), pattern);
     ASSERT_TRUE(std::filesystem::remove(path));
@@ -216,21 +207,42 @@ TEST_P(DiskResourceTest, UnalignedOffsetRoundTrip) {
     auto const ptr_offset = std::size_t{1};
     auto const file_offset = std::size_t{1};
 
-    auto source = make_buffer(pattern.size() + ptr_offset);
-    fill_buffer(*source, pattern, ptr_offset);
+    std::vector<std::byte> source(ptr_offset);
+    source.insert(source.end(), pattern.begin(), pattern.end());
 
-    ExclusiveBufferAccess{*source}.write(
-        *disk_, path, pattern.size(), ptr_offset, file_offset
+    EXPECT_EQ(
+        disk_->write(
+            path,
+            source.data() + ptr_offset,
+            pattern.size(),
+            MemoryType::HOST,
+            file_offset
+        ),
+        pattern.size()
     );
 
     EXPECT_EQ(std::filesystem::file_size(path), pattern.size() + file_offset);
     check_file_contents(path, file_offset, pattern);
 
-    auto destination = make_buffer(pattern.size() + ptr_offset);
-    ExclusiveBufferAccess{*destination}.read(
-        *disk_, path, pattern.size(), ptr_offset, file_offset
+    std::vector<std::byte> destination(pattern.size() + ptr_offset);
+    EXPECT_EQ(
+        disk_->read(
+            path,
+            destination.data() + ptr_offset,
+            pattern.size(),
+            MemoryType::HOST,
+            file_offset
+        ),
+        pattern.size()
     );
-    EXPECT_EQ(copy_from_buffer(*destination, pattern.size(), ptr_offset), pattern);
+    EXPECT_TRUE(
+        std::ranges::equal(
+            destination.begin() + ptr_offset,
+            destination.end(),
+            pattern.begin(),
+            pattern.end()
+        )
+    );
 
     ASSERT_TRUE(std::filesystem::remove(path));
 }
@@ -238,9 +250,10 @@ TEST_P(DiskResourceTest, UnalignedOffsetRoundTrip) {
 TEST_P(DiskResourceTest, FlushDoesNotThrow) {
     auto const path = test_path("flush");
     auto const pattern = make_pattern(4096);
-    auto source = make_buffer(pattern.size());
-    fill_buffer(*source, pattern, 0);
-    ExclusiveBufferAccess{*source}.write(*disk_, path, pattern.size());
+    EXPECT_EQ(
+        disk_->write(path, pattern.data(), pattern.size(), MemoryType::HOST),
+        pattern.size()
+    );
     EXPECT_NO_THROW(disk_->flush(path));
     ASSERT_TRUE(std::filesystem::remove(path));
 }
@@ -303,77 +316,68 @@ TEST(DiskResource, SharedPtrKeepsDiskResourceAlive) {
     EXPECT_TRUE(weak_disk.expired()) << "DiskResource not destructed, refcount cycle?";
 }
 
-TEST_P(DiskResourceTest, DiskBufferFromBufferRestoreRoundTrip) {
+TEST_P(DiskResourceTest, DiskBufferCopyRoundTrip) {
     auto const pattern = make_pattern(64 * 1024);
     auto source = make_buffer(pattern.size());
     fill_buffer(*source, pattern, 0);
 
-    auto disk_buf = DiskBuffer::from_buffer(std::move(source), *br_);
-    auto const path = disk_buf->path();
-    EXPECT_TRUE(std::filesystem::exists(path));
-    EXPECT_EQ(disk_buf->size(), pattern.size());
-    EXPECT_EQ(path.parent_path(), br_->disk_resource()->directory());
+    auto disk_buf = make_disk_backed_buffer(pattern.size());
+    buffer_copy(br_->statistics(), *disk_buf, *source, pattern.size());
+    EXPECT_EQ(disk_buf->mem_type(), MemoryType::DISK);
+    EXPECT_EQ(disk_buf->size, pattern.size());
+    EXPECT_EQ(source->size, pattern.size());
 
-    auto reservation = br_->reserve_or_fail(pattern.size(), GetParam());
-    auto destination = DiskBuffer::restore(std::move(disk_buf), reservation, stream_);
+    auto destination = make_buffer(pattern.size());
+    buffer_copy(br_->statistics(), *destination, *disk_buf, pattern.size());
     EXPECT_EQ(copy_from_buffer(*destination, pattern.size(), 0), pattern);
+    EXPECT_EQ(disk_buf->size, pattern.size());
 }
 
 TEST_P(DiskResourceTest, DiskBufferZeroSizeRoundTrip) {
     auto source = make_buffer(0);
-    auto disk_buf = DiskBuffer::from_buffer(std::move(source), *br_);
-    EXPECT_EQ(disk_buf->size(), 0U);
-    EXPECT_TRUE(std::filesystem::exists(disk_buf->path()));
+    auto disk_buf = make_disk_backed_buffer(0);
+    buffer_copy(br_->statistics(), *disk_buf, *source, 0);
+    EXPECT_EQ(disk_buf->size, 0U);
 
-    auto reservation = br_->reserve_or_fail(0, GetParam());
-    auto destination = DiskBuffer::restore(std::move(disk_buf), reservation, stream_);
+    auto destination = make_buffer(0);
+    buffer_copy(br_->statistics(), *destination, *disk_buf, 0);
     EXPECT_EQ(destination->size, 0U);
 }
 
-TEST_P(DiskResourceTest, DiskBufferMoveTransfersFileOwnership) {
-    auto const pattern = make_pattern(4096);
-    auto source = make_buffer(pattern.size());
-    fill_buffer(*source, pattern, 0);
-
-    auto disk_buf = DiskBuffer::from_buffer(std::move(source), *br_);
-    auto const path = disk_buf->path();
-    auto moved = std::move(disk_buf);
-    EXPECT_EQ(disk_buf, nullptr);
-    EXPECT_EQ(moved->path(), path);
-    EXPECT_TRUE(std::filesystem::exists(path));
-
-    auto reservation = br_->reserve_or_fail(pattern.size(), GetParam());
-    auto destination = DiskBuffer::restore(std::move(moved), reservation, stream_);
-    EXPECT_EQ(copy_from_buffer(*destination, pattern.size(), 0), pattern);
-}
-
-TEST_P(DiskResourceTest, DiskBufferDeallocateRemovesFile) {
-    auto const pattern = make_pattern(1024);
-    auto source = make_buffer(pattern.size());
-    fill_buffer(*source, pattern, 0);
-    auto disk_buf = DiskBuffer::from_buffer(std::move(source), *br_);
-    auto const path = disk_buf->path();
-    ASSERT_TRUE(std::filesystem::exists(path));
-
-    disk_buf->deallocate();
-    EXPECT_TRUE(disk_buf->path().empty());
-    EXPECT_EQ(disk_buf->size(), 0U);
-    EXPECT_FALSE(std::filesystem::exists(path));
-
-    EXPECT_NO_THROW(disk_buf->deallocate());
-}
-
 TEST_P(DiskResourceTest, DiskBufferDestructorRemovesFile) {
-    std::filesystem::path path;
+    std::filesystem::path path{};
     {
-        auto const pattern = make_pattern(1024);
-        auto source = make_buffer(pattern.size());
-        fill_buffer(*source, pattern, 0);
-        auto disk_buf = DiskBuffer::from_buffer(std::move(source), *br_);
-        path = disk_buf->path();
+        auto disk_buf = make_disk_backed_buffer(1024);
+        path = disk_buf->get_storage<Buffer::DiskBufferT>()->path();
         ASSERT_TRUE(std::filesystem::exists(path));
     }
     EXPECT_FALSE(std::filesystem::exists(path));
+}
+
+TEST_P(DiskResourceTest, DiskBufferReportsFileSize) {
+    DiskBuffer disk_buffer{disk_};
+    EXPECT_EQ(disk_buffer.file_size(), 0U);
+    EXPECT_TRUE(disk_buffer.copy_to_uint8_vector().empty());
+
+    auto const pattern = make_pattern(1024);
+
+    EXPECT_EQ(
+        disk_->write(
+            disk_buffer.path(), pattern.data(), pattern.size(), MemoryType::HOST
+        ),
+        pattern.size()
+    );
+
+    EXPECT_EQ(disk_buffer.file_size(), pattern.size());
+    EXPECT_TRUE(
+        std::ranges::equal(
+            disk_buffer.copy_to_uint8_vector(),
+            pattern,
+            [](std::uint8_t lhs, std::byte rhs) {
+                return lhs == std::to_integer<std::uint8_t>(rhs);
+            }
+        )
+    );
 }
 
 TEST_P(DiskResourceTest, DiskBufferOutlivesBufferResource) {
@@ -381,11 +385,9 @@ TEST_P(DiskResourceTest, DiskBufferOutlivesBufferResource) {
     auto source = make_buffer(pattern.size());
     fill_buffer(*source, pattern, 0);
 
-    auto disk_buf = DiskBuffer::from_buffer(std::move(source), *br_);
-    auto const path = disk_buf->path();
+    auto disk_buf = make_disk_backed_buffer(pattern.size());
+    buffer_copy(br_->statistics(), *disk_buf, *source, pattern.size());
     br_.reset();
-
-    ASSERT_TRUE(std::filesystem::exists(path));
 
     auto pinned_pool_properties = is_pinned_memory_resources_supported()
                                       ? PinnedPoolProperties{}
@@ -393,23 +395,23 @@ TEST_P(DiskResourceTest, DiskBufferOutlivesBufferResource) {
     auto br2 = BufferResource::create(
         rmm::mr::get_current_device_resource_ref(), std::move(pinned_pool_properties)
     );
-    auto reservation = br2->reserve_or_fail(pattern.size(), GetParam());
-    auto destination = DiskBuffer::restore(std::move(disk_buf), reservation, stream_);
+    auto destination =
+        br2->make_buffer(stream_, br2->reserve_or_fail(pattern.size(), GetParam()));
+    buffer_copy(br2->statistics(), *destination, *disk_buf, pattern.size());
     EXPECT_EQ(copy_from_buffer(*destination, pattern.size(), 0), pattern);
 }
 
-TEST_P(DiskResourceTest, DiskBufferRestoreRejectsUndersizedReservation) {
+TEST_P(DiskResourceTest, DiskBufferCopyRejectsUndersizedDestination) {
     auto const pattern = make_pattern(1024);
     auto source = make_buffer(pattern.size());
     fill_buffer(*source, pattern, 0);
-    auto disk_buf = DiskBuffer::from_buffer(std::move(source), *br_);
+    auto disk_buf = make_disk_backed_buffer(pattern.size());
+    buffer_copy(br_->statistics(), *disk_buf, *source, pattern.size());
 
-    auto reservation = br_->reserve_or_fail(512, GetParam());
+    auto destination = make_buffer(512);
     EXPECT_THROW(
-        [&] {
-            std::ignore = DiskBuffer::restore(std::move(disk_buf), reservation, stream_);
-        }(),
-        rapidsmpf::reservation_error
+        buffer_copy(br_->statistics(), *destination, *disk_buf, pattern.size()),
+        std::invalid_argument
     );
 }
 
@@ -429,15 +431,11 @@ TEST(DiskBufferConfiguredDirectory, UsesBufferResourceDirectory) {
         disk_dir.path()
     );
 
-    auto const pattern = make_pattern(256);
     auto stream = cuda::stream_ref{cudaStreamLegacy};
-    auto source =
-        br->make_buffer(stream, br->reserve_or_fail(pattern.size(), MemoryType::HOST));
-    fill_buffer(*source, pattern, 0);
-
-    auto disk_buf = DiskBuffer::from_buffer(std::move(source), *br);
+    auto disk_buf = br->make_buffer(stream, br->reserve_or_fail(256, MemoryType::DISK));
     EXPECT_EQ(
-        disk_buf->path().parent_path(), disk_dir.path() / std::to_string(::getpid())
+        disk_buf->get_storage<Buffer::DiskBufferT>()->path().parent_path(),
+        disk_dir.path() / std::to_string(::getpid())
     );
 }
 

@@ -16,6 +16,7 @@
 
 #include <rapidsmpf/config.hpp>
 #include <rapidsmpf/cuda_stream.hpp>
+#include <rapidsmpf/disk/disk_buffer.hpp>
 #include <rapidsmpf/disk/disk_resource.hpp>
 #include <rapidsmpf/error.hpp>
 #include <rapidsmpf/memory/buffer_resource.hpp>
@@ -147,6 +148,8 @@ std::int64_t BufferResource::memory_available(MemoryType mem_type) const noexcep
         }
     case MemoryType::HOST:
         return limit;
+    case MemoryType::DISK:
+        return disk_resource_ != nullptr ? limit : 0;
     }
     return std::numeric_limits<std::int64_t>::max();
 }
@@ -195,6 +198,11 @@ std::int64_t BufferResource::memory_available_for_reservation(MemoryType mem_typ
 std::pair<MemoryReservation, std::size_t> BufferResource::reserve(
     MemoryType mem_type, std::size_t size, AllowOverbooking allow_overbooking
 ) {
+    RAPIDSMPF_EXPECTS(
+        mem_type != MemoryType::DISK || disk_resource_ != nullptr,
+        "disk memory was requested but no disk resource is available",
+        std::invalid_argument
+    );
     RAPIDSMPF_EXPECTS(
         mem_type != MemoryType::PINNED_HOST || pinned_mr_.has_value(),
         "pinned memory resource is not available",
@@ -260,7 +268,10 @@ std::unique_ptr<Buffer> BufferResource::make_buffer(
     std::size_t size, cuda::stream_ref stream, MemoryReservation& reservation
 ) {
     auto const mem_type = reservation.mem_type_;
-    StreamOrderedTiming timing{stream, statistics_};
+    // disk buffer creation is not stream ordered, so we disable statistics for it
+    StreamOrderedTiming timing{
+        stream, mem_type == MemoryType::DISK ? Statistics::disabled() : statistics_
+    };
     std::unique_ptr<Buffer> ret;
     switch (mem_type) {
     case MemoryType::HOST:
@@ -282,6 +293,11 @@ std::unique_ptr<Buffer> BufferResource::make_buffer(
             std::make_unique<rmm::device_buffer>(size, stream, device_mr()),
             MemoryType::DEVICE
         ));
+        break;
+    case MemoryType::DISK:
+        ret = std::unique_ptr<Buffer>(
+            new Buffer(std::make_unique<disk::DiskBuffer>(disk_resource_), size, stream)
+        );
         break;
     default:
         RAPIDSMPF_FAIL("MemoryType: unknown");
