@@ -1040,3 +1040,117 @@ TEST(BufferResource, DeviceMrIsAddressableByMemoryRecorder) {
     EXPECT_EQ(rec.scoped.peak(), static_cast<std::int64_t>(kAllocBytes));
     EXPECT_EQ(rec.scoped.total(), static_cast<std::int64_t>(kAllocBytes));
 }
+
+class BufferResourceDiskCopyTest : public ::testing::TestWithParam<MemoryType> {
+  protected:
+    void SetUp() override {
+        if (GetParam() == MemoryType::PINNED_HOST
+            && !is_pinned_memory_resources_supported())
+        {
+            GTEST_SKIP() << "Pinned memory resources are not supported on this system";
+        }
+        auto pinned_pool_properties = is_pinned_memory_resources_supported()
+                                          ? PinnedPoolProperties{}
+                                          : PinnedMemoryDisabled;
+        br_ = BufferResource::create(
+            rmm::mr::get_current_device_resource_ref(),
+            std::move(pinned_pool_properties),
+            {},
+            std::chrono::milliseconds{1},
+            std::make_shared<StreamPool>(16),
+            Statistics::disabled(),
+            disk_test_dir()
+        );
+    }
+
+    std::unique_ptr<Buffer> make_buffer(std::size_t size) {
+        return br_->make_buffer(
+            cuda::stream_ref{cudaStreamLegacy}, br_->reserve_or_fail(size, GetParam())
+        );
+    }
+
+    std::unique_ptr<Buffer> make_disk_backed_buffer(std::size_t size) {
+        return br_->make_buffer(
+            cuda::stream_ref{cudaStreamLegacy},
+            br_->reserve_or_fail(size, MemoryType::DISK)
+        );
+    }
+
+    std::vector<std::uint8_t> copy_to_uint8_vector(Buffer const& buffer) {
+        std::vector<std::uint8_t> ret(buffer.size);
+        if (buffer.size > 0) {
+            RAPIDSMPF_CUDA_TRY(
+                cuda_memcpy_async(ret.data(), buffer.data(), buffer.size, buffer.stream())
+            );
+            buffer.stream().sync();
+        }
+        return ret;
+    }
+
+    std::shared_ptr<BufferResource> br_;
+};
+
+INSTANTIATE_TEST_SUITE_P(
+    AddressableMemoryTypes,
+    BufferResourceDiskCopyTest,
+    ::testing::ValuesIn(ADDRESSABLE_MEMORY_TYPES),
+    [](::testing::TestParamInfo<MemoryType> const& info) { return to_string(info.param); }
+);
+
+TEST_P(BufferResourceDiskCopyTest, DiskBufferCopyRoundTrip) {
+    auto source = make_buffer(64 * 1024);
+    auto const expected = fill_pattern(*source, source->size);
+
+    auto disk_buffer = make_disk_backed_buffer(source->size);
+    buffer_copy(br_->statistics(), *disk_buffer, *source, source->size);
+    EXPECT_EQ(disk_buffer->mem_type(), MemoryType::DISK);
+    EXPECT_EQ(disk_buffer->size, expected.size());
+
+    auto destination = make_buffer(expected.size());
+    buffer_copy(br_->statistics(), *destination, *disk_buffer, disk_buffer->size);
+    EXPECT_EQ(copy_to_uint8_vector(*destination), expected);
+}
+
+TEST_P(BufferResourceDiskCopyTest, DiskBufferZeroSizeRoundTrip) {
+    auto source = make_buffer(0);
+    auto disk_buffer = make_disk_backed_buffer(0);
+    buffer_copy(br_->statistics(), *disk_buffer, *source, 0);
+
+    auto destination = make_buffer(0);
+    buffer_copy(br_->statistics(), *destination, *disk_buffer, 0);
+    EXPECT_EQ(destination->size, 0U);
+}
+
+TEST_P(BufferResourceDiskCopyTest, DiskBufferOutlivesBufferResource) {
+    auto source = make_buffer(2048);
+    auto const expected = fill_pattern(*source, source->size);
+    auto disk_buffer = make_disk_backed_buffer(source->size);
+    buffer_copy(br_->statistics(), *disk_buffer, *source, source->size);
+    br_.reset();
+
+    auto pinned_pool_properties = is_pinned_memory_resources_supported()
+                                      ? PinnedPoolProperties{}
+                                      : PinnedMemoryDisabled;
+    auto br = BufferResource::create(
+        rmm::mr::get_current_device_resource_ref(), std::move(pinned_pool_properties)
+    );
+    auto destination = br->make_buffer(
+        cuda::stream_ref{cudaStreamLegacy},
+        br->reserve_or_fail(expected.size(), GetParam())
+    );
+    buffer_copy(br->statistics(), *destination, *disk_buffer, disk_buffer->size);
+    EXPECT_EQ(copy_to_uint8_vector(*destination), expected);
+}
+
+TEST_P(BufferResourceDiskCopyTest, DiskBufferCopyRejectsUndersizedDestination) {
+    auto source = make_buffer(1024);
+    fill_pattern(*source, source->size);
+    auto disk_buffer = make_disk_backed_buffer(source->size);
+    buffer_copy(br_->statistics(), *disk_buffer, *source, source->size);
+
+    auto destination = make_buffer(512);
+    EXPECT_THROW(
+        buffer_copy(br_->statistics(), *destination, *disk_buffer, disk_buffer->size),
+        std::invalid_argument
+    );
+}

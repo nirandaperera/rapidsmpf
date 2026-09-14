@@ -20,16 +20,11 @@
 #include <gtest/gtest.h>
 #include <unistd.h>
 
-#include <cuda/stream>
-
 #include <rmm/mr/per_device_resource.hpp>
 
 #include <rapidsmpf/disk/disk_buffer.hpp>
 #include <rapidsmpf/disk/disk_resource.hpp>
-#include <rapidsmpf/error.hpp>
-#include <rapidsmpf/memory/buffer.hpp>
 #include <rapidsmpf/memory/buffer_resource.hpp>
-#include <rapidsmpf/memory/cuda_memcpy_async.hpp>
 #include <rapidsmpf/memory/memory_type.hpp>
 
 #include "environment.hpp"
@@ -65,49 +60,6 @@ std::vector<std::byte> make_pattern(std::size_t size) {
     return result;
 }
 
-void fill_buffer(
-    Buffer& buffer, std::vector<std::byte> const& pattern, std::size_t offset
-) {
-    buffer.write_access([&](std::byte* ptr, cuda::stream_ref stream) {
-        RAPIDSMPF_CUDA_TRY(
-            cuda_memcpy_async(ptr + offset, pattern.data(), pattern.size(), stream)
-        );
-    });
-    buffer.stream().sync();
-}
-
-// DiskResource is blocking and not stream-ordered; take exclusive access after
-// the buffer's latest write has completed.
-struct ExclusiveBufferAccess {
-    explicit ExclusiveBufferAccess(Buffer& buf) : buffer_(buf) {
-        buffer_.stream().sync();
-        ptr_ = buffer_.exclusive_data_access();
-    }
-
-    ~ExclusiveBufferAccess() {
-        buffer_.unlock();
-    }
-
-    ExclusiveBufferAccess(ExclusiveBufferAccess const&) = delete;
-    ExclusiveBufferAccess& operator=(ExclusiveBufferAccess const&) = delete;
-    ExclusiveBufferAccess(ExclusiveBufferAccess&&) = delete;
-    ExclusiveBufferAccess& operator=(ExclusiveBufferAccess&&) = delete;
-
-    Buffer& buffer_;
-    std::byte* ptr_{nullptr};
-};
-
-std::vector<std::byte> copy_from_buffer(
-    Buffer const& buffer, std::size_t size, std::size_t offset
-) {
-    std::vector<std::byte> result(size);
-    RAPIDSMPF_CUDA_TRY(
-        cuda_memcpy_async(result.data(), buffer.data() + offset, size, buffer.stream())
-    );
-    buffer.stream().sync();
-    return result;
-}
-
 void check_file_contents(
     std::filesystem::path const& path,
     std::size_t file_offset,
@@ -125,24 +77,15 @@ void check_file_contents(
     EXPECT_EQ(actual, expected);
 }
 
-class DiskResourceTest : public ::testing::TestWithParam<MemoryType> {
+class DiskResourceTest : public ::testing::Test {
   protected:
     void SetUp() override {
         if (GlobalEnvironment->type() != TestEnvironmentType::SINGLE) {
             GTEST_SKIP() << "Disk I/O tests run only in the single-process environment";
         }
-        if (GetParam() == MemoryType::PINNED_HOST
-            && !is_pinned_memory_resources_supported())
-        {
-            GTEST_SKIP() << "Pinned memory resources are not supported on this system";
-        }
-
-        auto pinned_pool_properties = is_pinned_memory_resources_supported()
-                                          ? PinnedPoolProperties{}
-                                          : PinnedMemoryDisabled;
         br_ = BufferResource::create(
             rmm::mr::get_current_device_resource_ref(),
-            std::move(pinned_pool_properties),
+            PinnedMemoryDisabled,
             {},
             std::chrono::milliseconds{1},
             std::make_shared<StreamPool>(16),
@@ -150,58 +93,32 @@ class DiskResourceTest : public ::testing::TestWithParam<MemoryType> {
             test_spill_dir()
         );
         disk_ = br_->disk_resource();
-        stream_ = cuda::stream_ref{cudaStreamLegacy};
-    }
-
-    std::unique_ptr<Buffer> make_buffer(std::size_t size) {
-        return br_->make_buffer(stream_, br_->reserve_or_fail(size, GetParam()));
-    }
-
-    std::unique_ptr<Buffer> make_disk_backed_buffer(std::size_t size) {
-        return br_->make_buffer(stream_, br_->reserve_or_fail(size, MemoryType::DISK));
     }
 
     std::shared_ptr<DiskResource> disk_;
     std::shared_ptr<BufferResource> br_;
-    cuda::stream_ref stream_{cudaStreamLegacy};
 };
 
-INSTANTIATE_TEST_SUITE_P(
-    MemoryTypes,
-    DiskResourceTest,
-    ::testing::ValuesIn(ADDRESSABLE_MEMORY_TYPES),
-    [](::testing::TestParamInfo<MemoryType> const& info) { return to_string(info.param); }
-);
-
-TEST_P(DiskResourceTest, RoundTrip) {
+TEST_F(DiskResourceTest, RoundTrip) {
     auto const path = test_path("roundtrip");
     auto const pattern = make_pattern(64 * 1024);
-    auto source = make_buffer(pattern.size());
-    fill_buffer(*source, pattern, 0);
 
     EXPECT_EQ(
-        disk_->write(
-            path, ExclusiveBufferAccess{*source}.ptr_, pattern.size(), source->mem_type()
-        ),
+        disk_->write(path, pattern.data(), pattern.size(), MemoryType::HOST),
         pattern.size()
     );
 
-    auto destination = make_buffer(pattern.size());
+    std::vector<std::byte> destination(pattern.size());
     EXPECT_EQ(
-        disk_->read(
-            path,
-            ExclusiveBufferAccess{*destination}.ptr_,
-            pattern.size(),
-            destination->mem_type()
-        ),
+        disk_->read(path, destination.data(), pattern.size(), MemoryType::HOST),
         pattern.size()
     );
 
-    EXPECT_EQ(copy_from_buffer(*destination, pattern.size(), 0), pattern);
+    EXPECT_EQ(destination, pattern);
     ASSERT_TRUE(std::filesystem::remove(path));
 }
 
-TEST_P(DiskResourceTest, UnalignedOffsetRoundTrip) {
+TEST_F(DiskResourceTest, UnalignedOffsetRoundTrip) {
     auto const path = test_path("unaligned");
     auto const pattern = make_pattern(16 * 1024);
     auto const ptr_offset = std::size_t{1};
@@ -247,7 +164,7 @@ TEST_P(DiskResourceTest, UnalignedOffsetRoundTrip) {
     ASSERT_TRUE(std::filesystem::remove(path));
 }
 
-TEST_P(DiskResourceTest, FlushDoesNotThrow) {
+TEST_F(DiskResourceTest, FlushDoesNotThrow) {
     auto const path = test_path("flush");
     auto const pattern = make_pattern(4096);
     EXPECT_EQ(
@@ -316,45 +233,17 @@ TEST(DiskResource, SharedPtrKeepsDiskResourceAlive) {
     EXPECT_TRUE(weak_disk.expired()) << "DiskResource not destructed, refcount cycle?";
 }
 
-TEST_P(DiskResourceTest, DiskBufferCopyRoundTrip) {
-    auto const pattern = make_pattern(64 * 1024);
-    auto source = make_buffer(pattern.size());
-    fill_buffer(*source, pattern, 0);
-
-    auto disk_buf = make_disk_backed_buffer(pattern.size());
-    buffer_copy(br_->statistics(), *disk_buf, *source, pattern.size());
-    EXPECT_EQ(disk_buf->mem_type(), MemoryType::DISK);
-    EXPECT_EQ(disk_buf->size, pattern.size());
-    EXPECT_EQ(source->size, pattern.size());
-
-    auto destination = make_buffer(pattern.size());
-    buffer_copy(br_->statistics(), *destination, *disk_buf, pattern.size());
-    EXPECT_EQ(copy_from_buffer(*destination, pattern.size(), 0), pattern);
-    EXPECT_EQ(disk_buf->size, pattern.size());
-}
-
-TEST_P(DiskResourceTest, DiskBufferZeroSizeRoundTrip) {
-    auto source = make_buffer(0);
-    auto disk_buf = make_disk_backed_buffer(0);
-    buffer_copy(br_->statistics(), *disk_buf, *source, 0);
-    EXPECT_EQ(disk_buf->size, 0U);
-
-    auto destination = make_buffer(0);
-    buffer_copy(br_->statistics(), *destination, *disk_buf, 0);
-    EXPECT_EQ(destination->size, 0U);
-}
-
-TEST_P(DiskResourceTest, DiskBufferDestructorRemovesFile) {
+TEST_F(DiskResourceTest, DiskBufferDestructorRemovesFile) {
     std::filesystem::path path{};
     {
-        auto disk_buf = make_disk_backed_buffer(1024);
-        path = disk_buf->get_storage<Buffer::DiskBufferT>()->path();
+        DiskBuffer disk_buffer{disk_};
+        path = disk_buffer.path();
         ASSERT_TRUE(std::filesystem::exists(path));
     }
     EXPECT_FALSE(std::filesystem::exists(path));
 }
 
-TEST_P(DiskResourceTest, DiskBufferReportsFileSize) {
+TEST_F(DiskResourceTest, DiskBufferReportsFileSize) {
     DiskBuffer disk_buffer{disk_};
     EXPECT_EQ(disk_buffer.file_size(), 0U);
     EXPECT_TRUE(disk_buffer.copy_to_uint8_vector().empty());
@@ -380,41 +269,6 @@ TEST_P(DiskResourceTest, DiskBufferReportsFileSize) {
     );
 }
 
-TEST_P(DiskResourceTest, DiskBufferOutlivesBufferResource) {
-    auto const pattern = make_pattern(2048);
-    auto source = make_buffer(pattern.size());
-    fill_buffer(*source, pattern, 0);
-
-    auto disk_buf = make_disk_backed_buffer(pattern.size());
-    buffer_copy(br_->statistics(), *disk_buf, *source, pattern.size());
-    br_.reset();
-
-    auto pinned_pool_properties = is_pinned_memory_resources_supported()
-                                      ? PinnedPoolProperties{}
-                                      : PinnedMemoryDisabled;
-    auto br2 = BufferResource::create(
-        rmm::mr::get_current_device_resource_ref(), std::move(pinned_pool_properties)
-    );
-    auto destination =
-        br2->make_buffer(stream_, br2->reserve_or_fail(pattern.size(), GetParam()));
-    buffer_copy(br2->statistics(), *destination, *disk_buf, pattern.size());
-    EXPECT_EQ(copy_from_buffer(*destination, pattern.size(), 0), pattern);
-}
-
-TEST_P(DiskResourceTest, DiskBufferCopyRejectsUndersizedDestination) {
-    auto const pattern = make_pattern(1024);
-    auto source = make_buffer(pattern.size());
-    fill_buffer(*source, pattern, 0);
-    auto disk_buf = make_disk_backed_buffer(pattern.size());
-    buffer_copy(br_->statistics(), *disk_buf, *source, pattern.size());
-
-    auto destination = make_buffer(512);
-    EXPECT_THROW(
-        buffer_copy(br_->statistics(), *destination, *disk_buf, pattern.size()),
-        std::invalid_argument
-    );
-}
-
 TEST(DiskBufferConfiguredDirectory, UsesBufferResourceDirectory) {
     if (GlobalEnvironment->type() != TestEnvironmentType::SINGLE) {
         GTEST_SKIP() << "Disk I/O tests run only in the single-process environment";
@@ -431,11 +285,8 @@ TEST(DiskBufferConfiguredDirectory, UsesBufferResourceDirectory) {
         disk_dir.path()
     );
 
-    auto stream = cuda::stream_ref{cudaStreamLegacy};
-    auto disk_buf = br->make_buffer(stream, br->reserve_or_fail(256, MemoryType::DISK));
     EXPECT_EQ(
-        disk_buf->get_storage<Buffer::DiskBufferT>()->path().parent_path(),
-        disk_dir.path() / std::to_string(::getpid())
+        br->disk_resource()->directory(), disk_dir.path() / std::to_string(::getpid())
     );
 }
 
