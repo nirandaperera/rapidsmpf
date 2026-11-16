@@ -109,3 +109,36 @@ install(
   DESTINATION bin
   EXCLUDE_FROM_ALL
 )
+
+add_executable(
+  print_system_topology "print_system_topology.cpp" "${PROJECT_SOURCE_DIR}/src/bootstrap/utils.cpp"
+                        "${PROJECT_SOURCE_DIR}/src/system_info.cpp"
+)
+set_target_properties(
+  print_system_topology
+  PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${RAPIDSMPF_BINARY_DIR}/tools"
+             CXX_STANDARD 20
+             CXX_STANDARD_REQUIRED ON
+)
+target_include_directories(print_system_topology PRIVATE "${PROJECT_SOURCE_DIR}/include")
+target_compile_options(
+  print_system_topology PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${RAPIDSMPF_CXX_FLAGS}>"
+)
+target_compile_definitions(
+  print_system_topology PRIVATE $<$<BOOL:${RAPIDSMPF_HAVE_NUMA}>:RAPIDSMPF_HAVE_NUMA>
+)
+target_link_libraries(
+  print_system_topology
+  PRIVATE CUDA::cudart_static
+          cuCascade::cucascade_topology_discovery
+          $<TARGET_NAME_IF_EXISTS:conda_env>
+          maybe_asan
+          $<$<BOOL:${RAPIDSMPF_HAVE_NUMA}>:numa>
+          ${CMAKE_DL_LIBS}
+)
+install(
+  TARGETS print_system_topology
+  COMPONENT tools
+  DESTINATION bin
+  EXCLUDE_FROM_ALL
+)
